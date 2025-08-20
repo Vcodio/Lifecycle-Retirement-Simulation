@@ -1,7 +1,7 @@
 # Lifecycle-Retirement-Simulation
 This script is designed to simulate possibility of outcomes to not only simulate how robust your portfolio is at sustaining withdrawals in retirement, but at what age you will be able to retire given an uncertain labor income. 
 
-The simulation is based on a Fixed Spending Rule, where a constant, inflation adjusted amount is withdrawn from the portfolio each year in retirement. Over time I plan on upgrading this to use an Amortization based withdrawal strategy that will 
+
 
 How it Works
 
@@ -49,3 +49,18 @@ include_social_security: A toggle to include Social Security benefits in the cal
 You can also adjust the asset assumptions and portfolio weights to match your personal investment strategy. In this example, the mean returns are forecasted, but the variances and covarainces are sourced from Testfol.io. Testfol.io is a good source.
 
 Jump Intensity, Jump Mean, Jump Std Dev are derrived from historical data. Here I fit the historical data to a Merton Jump Diffusion model. This script will also be provided in this Repo, and again I source a backtest of the portfolio from Testfol.io. If you want, you can alter these parameters to be whatever you would like. Here we have a large jump intensity with a low jump mean, but a low jump intensity and high jump mean might be better suited for you. 
+
+The simulation is currently using a Fixed Spending Rule, where a constant, inflation adjusted amount is withdrawn from the portfolio each year in retirement. 
+
+Over time I plan on upgrading this to use an Amortization based withdrawal strategy that will allow some variability in spending. 
+
+This change will require major overhauls on how we measure "succsss". 
+1. Utility of consumption and bequest during withdrawal period.
+2. Percentage of times the portfolio was able to sustain above $X real during the withdrawal period.
+
+I also would like to include several other things.
+1. Simulate Heterosexual couple mortality
+2. Rather than savings rate, have an "expenses rate" where those expenses are financed first, and savings are what is left over.
+3. Incorporate Taxes and Fees
+4. Add time varying risk premiums. Perhaps simulate cash flow and discount rate seperately, since amortization based withdrawals rely on expected return assumptions which are time varying.
+5. Upgrade to GARCH Model 
