@@ -1,0 +1,592 @@
+# ================================================================
+# VERSION 4.1 — Lifecycle Retirement Simulation - Fixed Withdrawal
+# ================================================================
+# This script simulates a complete financial lifecycle, from the
+# accumulation phase (working and saving) to the retirement phase
+# (withdrawing from the portfolio). It uses a stochastic model to
+# account for market returns, inflation, salary growth, and even
+# unemployment. This uses a Fixed Spending Rule, withdrawing
+# spending_real from the portfolio every year.
+#
+# Key Features:
+# - Stage 1: Calculates the required principal to retire at various ages
+#            within a specified success rate.
+# - Stage 2: Runs a large number of simulations to determine the
+#            distribution of possible retirement ages.
+# - Stochastic Modeling: Uses a jump diffusion model for market returns
+#            and normal distributions for inflation, salary, and savings.
+# - CSV Export: Exports summary tables and detailed simulation paths for
+#               analysis and debugging.
+#
+# Changes from version 3.5:
+# - Added Independent savings rate when unemployed in simulation
+# - Fixed CDF Plotting: Corrects the logic for the cumulative
+#   probability plot by properly filtering and sorting the data.
+# - Code Consolidation: Combines all previous fixes and additions
+#   into a single, comprehensive script.
+# - Several bug fixes and performance enhancements
+#
+# Dependencies:
+#   pip install numpy pandas tqdm rich matplotlib
+#
+# ------------------------------------------------
+# Author: VCODIO
+# ------------------------------------------------
+
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+from rich.console import Console
+from rich.table import Table
+
+# --- Setup for plotting and console output ---
+try:
+    import matplotlib.pyplot as plt
+    plt.style.use('dark_background')
+except ImportError:
+    print("Matplotlib not found. Visualization will be skipped.")
+    plt = None
+
+try:
+    console = Console()
+except ImportError:
+    print("Rich library not found. Using standard print for tables.")
+    console = None
+
+# ----------------------
+# User inputs / parameters
+# ----------------------
+initial_age = 20
+death_age = 100
+initial_portfolio = 100_000
+
+# Parameters for stochastic labor income
+annual_income_real = 50_000.0
+annual_salary_growth_rate = 0.02
+salary_growth_rate_std_dev = 0.015
+savings_rate = 0.15
+savings_rate_std_dev = 0.05
+unemployment_prob = 0.08
+unemployment_income_multiplier = 0.25
+unemployment_savings_rate = -0.05
+
+spending_real = 50_000.0
+
+mean_inflation_geometric = 0.025
+std_inflation = 0.02
+
+# New user inputs for Social Security
+social_security_real = 25000
+social_security_start_age = 67
+include_social_security = True
+
+# Simulation numbers
+num_outer = 10000
+num_nested = 500
+success_target = 0.99
+
+# Toggles for CSV export
+generate_csv_summary = True
+num_sims_to_export = 500
+
+# ----------------------
+# Portfolio Definitions
+# ----------------------
+ASSET_NAMES = ['VTISIM','SPYSIM?L=2','VXUSIM','DFSVX','DISVX','ZROZSIM']
+
+# Accumulation Phase Portfolio
+ACCUMULATION_WEIGHTS = np.array([0.3, 0.2, 0.15, 0.10, 0.05, 0.2])
+
+# Withdrawal Phase Portfolio
+WITHDRAWAL_WEIGHTS = np.array([0.6, 0.0, 0.2, 0.0, 0.0, 0.2])
+
+# Manual Asset Assumptions (annualized)
+expected_returns_geometric = np.array([0.0866, 0.12, 0.0866, 0.09, 0.09, 0.0433])
+volatilities = np.array([0.1913, 0.3835, 0.1837, 0.2248, 0.1609, 0.2306])
+correlations = np.array([
+    [1.00, 0.98, 0.784, 0.856, 0.631, -0.228],
+    [0.98, 1.00, 0.764, 0.807, 0.608, -0.212],
+    [0.784, 0.764, 1.00, 0.729, 0.843,-0.237],
+    [0.856, 0.807, 0.729, 1.00, 0.68, -0.270],
+    [0.631, 0.608, 0.843, 0.680, 1.00,-0.216],
+    [-0.228, -0.212, -0.237, -0.270, -0.216, 1.00],
+])
+
+cov_matrix = np.outer(volatilities, volatilities) * correlations
+
+# ----------------------
+# Helper Functions
+# ----------------------
+def convert_geometric_to_arithmetic(mean_geometric, std_dev):
+    """
+    Converts a geometric mean return to an arithmetic mean return.
+    """
+    return mean_geometric + 0.5 * std_dev**2
+
+expected_returns_arithmetic = convert_geometric_to_arithmetic(expected_returns_geometric, volatilities)
+mean_inflation_arithmetic = convert_geometric_to_arithmetic(mean_inflation_geometric, std_inflation)
+
+acc_mean_return = np.dot(ACCUMULATION_WEIGHTS, expected_returns_arithmetic)
+acc_std_return = np.sqrt(np.dot(ACCUMULATION_WEIGHTS.T, np.dot(cov_matrix, ACCUMULATION_WEIGHTS)))
+wd_mean_return = np.dot(WITHDRAWAL_WEIGHTS, expected_returns_arithmetic)
+wd_std_return = np.sqrt(np.dot(WITHDRAWAL_WEIGHTS.T, np.dot(cov_matrix, WITHDRAWAL_WEIGHTS)))
+
+# Merton Jump Diffusion Parameters (Fit Historical data to Merton Jump Diffusion model. This is where the values are coming from)
+acc_jump_intensity = 74.6316
+acc_jump_mean = -0.0024
+acc_jump_std_dev = 0.0154
+wd_jump_intensity = 57.6199
+wd_jump_mean = -0.0018
+wd_jump_std_dev = 0.0135
+
+rng = np.random.default_rng(seed=2025)
+# -----------------------------------------------------------------------------
+# Main Execution: Stage 1
+# -----------------------------------------------------------------------------
+def calculate_max_drawdown(series):
+    if len(series) == 0: return 0
+    peak = series[0]
+    max_drawdown = 0.0
+    for value in series:
+        if value > peak: peak = value
+        drawdown = (value - peak) / peak
+        if drawdown < max_drawdown: max_drawdown = drawdown
+    return max_drawdown
+
+def calculate_nominal_value(real_value, current_age, target_age, mean_inflation):
+    years = target_age - current_age
+    return real_value * (1 + mean_inflation)**years
+
+def simulate_annual_return(rng_local, mean_annual, std_dev_annual, jump_intensity, jump_mean, jump_std_dev):
+    num_jumps = rng_local.poisson(jump_intensity)
+    jump_component = 0
+    if num_jumps > 0:
+        jump_component = np.sum(rng_local.normal(jump_mean, jump_std_dev, num_jumps))
+    diffusion_mean = mean_annual - (jump_intensity * jump_mean)
+    diffusion_component = rng_local.normal(diffusion_mean, std_dev_annual)
+    return diffusion_component + jump_component
+
+def simulate_withdrawals(start_portfolio, start_age, rng_local):
+    portfolio = start_portfolio
+    age = start_age
+    portfolio_history = [start_portfolio]
+    local_inflation_history = []
+
+    while age < death_age:
+        inflation = rng_local.normal(mean_inflation_arithmetic, std_inflation)
+        local_inflation_history.append(inflation)
+        total_inflation_factor = np.prod([1 + i for i in local_inflation_history])
+
+        spending_nominal_this_year = spending_real * total_inflation_factor
+        social_security_nominal_this_year = 0
+        if include_social_security and age >= social_security_start_age:
+            social_security_nominal_this_year = social_security_real * total_inflation_factor
+
+        net_withdrawal = max(0, spending_nominal_this_year - social_security_nominal_this_year)
+
+        portfolio -= net_withdrawal
+        if portfolio <= 0:
+            return False, 0.0, 0.0, 0.0, [], [], []
+
+        market_return = simulate_annual_return(rng_local, wd_mean_return, wd_std_return, wd_jump_intensity, wd_jump_mean, wd_jump_std_dev)
+        portfolio *= (1 + market_return)
+
+        portfolio_history.append(portfolio)
+        age += 1
+
+    growth_rates = [portfolio_history[i] / portfolio_history[i-1] - 1 for i in range(1, len(portfolio_history))]
+    mean_growth = np.mean(growth_rates) if growth_rates else 0
+    std_dev = np.std(growth_rates) if growth_rates else 0
+    max_drawdown = calculate_max_drawdown(np.array(portfolio_history))
+
+    return True, mean_growth, std_dev, max_drawdown, portfolio_history, [], []
+
+def check_success_rate(principal, retirement_age, num_nested_sims):
+    nested_rng = np.random.default_rng(seed=2026)
+    successes = 0
+    metrics = {'mean_growth': [], 'std_dev': [], 'max_drawdown': []}
+
+    for _ in range(num_nested_sims):
+        is_success, mg, sd, mdd, _, _, _ = simulate_withdrawals(principal, retirement_age, nested_rng)
+        if is_success:
+            successes += 1
+            metrics['mean_growth'].append(mg)
+            metrics['std_dev'].append(sd)
+            metrics['max_drawdown'].append(mdd)
+    success_rate = successes / num_nested_sims
+    return success_rate, metrics
+
+def find_required_principal(target_age, success_target, num_nested_sims):
+    low_principal = 10_000.0
+    high_principal = 20_000_000.0
+    tolerance = 1000.0
+    while high_principal - low_principal > tolerance:
+        mid_principal = (low_principal + high_principal) / 2
+        success_rate, _ = check_success_rate(mid_principal, target_age, num_nested_sims)
+        if success_rate >= success_target:
+            high_principal = mid_principal
+        else:
+            low_principal = mid_principal
+    return high_principal
+
+def print_rich_table(df, title):
+    if console:
+        table = Table(title=title, title_style="bold magenta", header_style="bold cyan")
+        for col in df.columns:
+            table.add_column(col, justify="right")
+        for _, row in df.iterrows():
+            table.add_row(*[str(item) for item in row])
+        console.print(table)
+    else:
+        print(f"\n--- {title} ---")
+        print(df.to_string())
+
+def export_to_csv(data_dict, filename):
+    try:
+        df = pd.DataFrame(data_dict)
+        df.to_csv(filename, index=False)
+        print(f"\nData successfully exported to '{filename}'")
+    except ImportError:
+        print(f"Pandas not found. Skipping CSV export to '{filename}'.")
+
+def export_detailed_simulations_to_csv(sim_data, filename):
+    if not sim_data:
+        print("No detailed simulation data to export.")
+        return
+    flat_data = [year_data for sim_path in sim_data for year_data in sim_path]
+    try:
+        df = pd.DataFrame(flat_data)
+        cols = ['SIM_ID', 'AGE', 'RETIRED?', 'PORTFOLIO_VALUE',
+                'REQUIRED_REAL_PRINCIPAL', 'WITHDRAWAL_RATE', 'REQUIRED_NOMINAL_PRINCIPAL',
+                'NOMINAL_DESIRED_CONSUMPTION', 'REAL_DESIRED_CONSUMPTION',
+                'YOY_INFLATION', 'CUMULATIVE_INFLATION',
+                'REAL_SOCIAL_SECURITY_BENEFIT', 'NOMINAL_SOCIAL_SECURITY_BENEFIT',
+                'SAVINGS_RATE', 'SALARY', 'EMPLOYED?', 'DOLLARS_SAVED',
+                'REAL_SALARY_GROWTH_RATE', 'NOMINAL_SALARY_GROWTH_RATE',
+                'YOY_PORTFOLIO_RETURN', 'CUMULATIVE_PORTFOLIO_RETURN']
+        df_cols = list(df.columns)
+        for col in cols:
+            if col not in df_cols:
+                df[col] = None
+        df.to_csv(filename, index=False, columns=cols)
+        print(f"Detailed lifecycle simulation paths successfully exported to '{filename}'")
+    except ImportError:
+        print(f"Pandas not found. Skipping CSV export to '{filename}'.")
+
+
+if __name__ == "__main__":
+    try:
+        print("\n--- Stage 1: Building Required Principal Lookup Table ---")
+        target_ages = np.arange(30, 71)
+        required_principal_table = {}
+        for age in tqdm(target_ages, desc="Calculating required principal per age"):
+            principal = find_required_principal(age, success_target, num_nested)
+            required_principal_table[age] = principal
+
+        required_principal_data = []
+        for age, principal_real in required_principal_table.items():
+            principal_nominal = calculate_nominal_value(principal_real, initial_age, age, mean_inflation_arithmetic)
+            net_withdrawal_real = spending_real
+            if include_social_security and age >= social_security_start_age:
+                net_withdrawal_real = max(0, spending_real - social_security_real)
+            swr_val = (net_withdrawal_real / principal_real) * 100
+            nominal_spending_at_retirement = calculate_nominal_value(spending_real, initial_age, age, mean_inflation_arithmetic)
+            nominal_ss_at_retirement = 0
+            if include_social_security:
+                nominal_ss_at_retirement = calculate_nominal_value(social_security_real, initial_age, age, mean_inflation_arithmetic)
+            net_withdrawal_nominal = nominal_spending_at_retirement
+            if include_social_security and age >= social_security_start_age:
+                net_withdrawal_nominal = max(0, nominal_spending_at_retirement - nominal_ss_at_retirement)
+            required_principal_data.append({
+                'age': age,
+                'principal_real': principal_real,
+                'principal_nominal': principal_nominal,
+                'spending_real': spending_real,
+                'spending_nominal': nominal_spending_at_retirement,
+                'net_withdrawal_real': net_withdrawal_real,
+                'net_withdrawal_nominal': net_withdrawal_nominal,
+                'swr': swr_val
+            })
+
+        if generate_csv_summary:
+            export_to_csv(required_principal_data, 'required_principal_table.csv')
+
+        df_table = pd.DataFrame(required_principal_data)
+        df_table['principal_real'] = df_table['principal_real'].apply(lambda x: f"${x:,.2f}")
+        df_table['principal_nominal'] = df_table['principal_nominal'].apply(lambda x: f"${x:,.2f}")
+        df_table['spending_real'] = df_table['spending_real'].apply(lambda x: f"${x:,.2f}")
+        df_table['spending_nominal'] = df_table['spending_nominal'].apply(lambda x: f"${x:,.2f}")
+        df_table['net_withdrawal_real'] = df_table['net_withdrawal_real'].apply(lambda x: f"${x:,.2f}")
+        df_table['net_withdrawal_nominal'] = df_table['net_withdrawal_nominal'].apply(lambda x: f"${x:,.2f}")
+        df_table['swr'] = df_table['swr'].apply(lambda x: f"{x:.2f}%")
+        df_table.rename(columns={'age': 'Retirement Age', 'principal_real': 'Principal (Real $)', 'principal_nominal': 'Principal (Nominal $)', 'spending_real': 'Spending (Real $)', 'spending_nominal': 'Spending (Nominal $)', 'net_withdrawal_real': 'Net Withdrawal (Real $)', 'net_withdrawal_nominal': 'Net Withdrawal (Nominal $)', 'swr': 'Withdrawal Rate'}, inplace=True)
+        print_rich_table(df_table, "Required Principal & Withdrawal Rate for 95% Success")
+
+        principal_lookup = {row['age']: {'principal_real': row['principal_real'], 'principal_nominal': row['principal_nominal'], 'swr': row['swr']} for row in required_principal_data}
+# -----------------------------------------------------------------------------
+# Main Execution: Stage 2
+# -----------------------------------------------------------------------------
+        print("\n--- Stage 2: Running Accumulation Simulations ---")
+        retirement_ages = np.full(num_outer, np.nan)
+        ever_retired = np.zeros(num_outer, dtype=bool)
+        detailed_simulations_to_export = []
+        final_bequest_nominal_data = []
+        final_bequest_real_data = []
+        final_spending_nominal_data = []
+        final_spending_real_data = []
+
+        for sim in tqdm(range(num_outer), desc="Running Simulations"):
+            portfolio = initial_portfolio
+            age = initial_age
+            retirement_age = np.nan
+            swr_at_retirement = np.nan
+            path_inflation = []
+            current_annual_income_real = annual_income_real
+            is_retired = False
+            portfolio_growth_factor = 1.0
+            current_sim_record = []
+
+            while age <= death_age:
+                is_currently_retired = is_retired
+                required_principal_real = np.nan
+                required_principal_nominal = np.nan
+                swr_for_age = np.nan
+
+                if not is_currently_retired:
+                    required_principal_data_for_age = principal_lookup.get(age, {})
+                    required_principal_real = required_principal_data_for_age.get('principal_real', np.nan)
+                    swr_for_age = required_principal_data_for_age.get('swr', np.nan)
+                    if not np.isnan(required_principal_real):
+                        cumulative_inflation = np.prod([1 + i for i in path_inflation]) if path_inflation else 1.0
+                        required_principal_nominal = required_principal_real * cumulative_inflation
+                        if portfolio >= required_principal_nominal:
+                            retirement_age = age
+                            is_currently_retired = True
+                            swr_at_retirement = swr_for_age
+
+                inflation = rng.normal(mean_inflation_arithmetic, std_inflation)
+                path_inflation.append(inflation)
+                cumulative_inflation = np.prod([1 + i for i in path_inflation])
+
+                nominal_desired_consumption = spending_real * cumulative_inflation
+                real_desired_consumption = spending_real
+
+                nominal_ss_benefit = 0
+                real_ss_benefit = 0
+                if include_social_security and age >= social_security_start_age:
+                    nominal_ss_benefit = social_security_real * cumulative_inflation
+                    real_ss_benefit = social_security_real
+
+                savings_for_year_nominal = 0
+                income_for_year_real = 0
+                is_unemployed = False
+                savings_rate_for_year = np.nan
+
+                if not is_currently_retired:
+                    is_unemployed = rng.random() < unemployment_prob
+                    if is_unemployed:
+                        savings_rate_for_year = unemployment_savings_rate
+                    else:
+                        savings_rate_for_year = max(0, rng.normal(savings_rate, savings_rate_std_dev))
+                    income_for_year_real = current_annual_income_real * unemployment_income_multiplier if is_unemployed else current_annual_income_real
+                    savings_for_year_nominal = income_for_year_real * savings_rate_for_year * cumulative_inflation
+
+                market_return = 0
+                if not is_currently_retired:
+                    market_return = simulate_annual_return(rng, acc_mean_return, acc_std_return, acc_jump_intensity, acc_jump_mean, acc_jump_std_dev)
+                else:
+                    market_return = simulate_annual_return(rng, wd_mean_return, wd_std_return, wd_jump_intensity, wd_jump_mean, wd_jump_std_dev)
+
+                if not is_currently_retired:
+                    portfolio += savings_for_year_nominal
+                    portfolio *= (1 + market_return)
+                    salary_growth_rate_this_year_real = rng.normal(annual_salary_growth_rate, salary_growth_rate_std_dev)
+                    current_annual_income_real = max(0, current_annual_income_real * (1 + salary_growth_rate_this_year_real))
+                else:
+                    net_withdrawal = max(0, nominal_desired_consumption - nominal_ss_benefit)
+                    portfolio -= net_withdrawal
+                    portfolio *= (1 + market_return)
+                    salary_growth_rate_this_year_real = np.nan
+
+                portfolio_growth_factor *= (1 + market_return)
+
+                if is_currently_retired and portfolio <= 0:
+                    portfolio = 0
+
+                if sim < num_sims_to_export:
+                    cumulative_return = portfolio_growth_factor - 1
+                    salary_growth_rate_this_year_nominal = np.nan
+                    if not is_currently_retired:
+                        salary_growth_rate_this_year_nominal = (1 + salary_growth_rate_this_year_real) * (1 + inflation) - 1
+                    record_dict = {
+                        'SIM_ID': sim, 'AGE': age, 'RETIRED?': is_currently_retired, 'PORTFOLIO_VALUE': portfolio,
+                        'REQUIRED_REAL_PRINCIPAL': required_principal_real, 'WITHDRAWAL_RATE': swr_for_age, 'REQUIRED_NOMINAL_PRINCIPAL': required_principal_nominal,
+                        'NOMINAL_DESIRED_CONSUMPTION': nominal_desired_consumption, 'REAL_DESIRED_CONSUMPTION': real_desired_consumption,
+                        'YOY_INFLATION': inflation, 'CUMULATIVE_INFLATION': cumulative_inflation,
+                        'REAL_SOCIAL_SECURITY_BENEFIT': real_ss_benefit, 'NOMINAL_SOCIAL_SECURITY_BENEFIT': nominal_ss_benefit,
+                        'SAVINGS_RATE': savings_rate_for_year, 'SALARY': income_for_year_real * cumulative_inflation if not is_currently_retired else np.nan,
+                        'EMPLOYED?': not is_unemployed if not is_currently_retired else False, 'DOLLARS_SAVED': savings_for_year_nominal,
+                        'REAL_SALARY_GROWTH_RATE': salary_growth_rate_this_year_real, 'NOMINAL_SALARY_GROWTH_RATE': salary_growth_rate_this_year_nominal,
+                        'YOY_PORTFOLIO_RETURN': market_return, 'CUMULATIVE_PORTFOLIO_RETURN': cumulative_return,
+                    }
+                    current_sim_record.append(record_dict)
+
+                if is_currently_retired and portfolio <= 0 and age < death_age - 1:
+                    while age < death_age - 1:
+                        age += 1
+                        record_dict_pad = {
+                            'SIM_ID': sim, 'AGE': age, 'RETIRED?': True, 'PORTFOLIO_VALUE': 0, 'REQUIRED_REAL_PRINCIPAL': np.nan,
+                            'WITHDRAWAL_RATE': np.nan, 'REQUIRED_NOMINAL_PRINCIPAL': np.nan, 'NOMINAL_DESIRED_CONSUMPTION': np.nan,
+                            'REAL_DESIRED_CONSUMPTION': np.nan, 'YOY_INFLATION': np.nan, 'CUMULATIVE_INFLATION': np.nan,
+                            'REAL_SOCIAL_SECURITY_BENEFIT': np.nan, 'NOMINAL_SOCIAL_SECURITY_BENEFIT': np.nan, 'SAVINGS_RATE': np.nan,
+                            'SALARY': np.nan, 'EMPLOYED?': False, 'DOLLARS_SAVED': np.nan, 'REAL_SALARY_GROWTH_RATE': np.nan,
+                            'NOMINAL_SALARY_GROWTH_RATE': np.nan, 'YOY_PORTFOLIO_RETURN': np.nan, 'CUMULATIVE_PORTFOLIO_RETURN': cumulative_return,
+                        }
+                        current_sim_record.append(record_dict_pad)
+                    break
+
+                age += 1
+                is_retired = is_currently_retired
+
+            if sim < num_sims_to_export:
+                detailed_simulations_to_export.append(current_sim_record)
+            retirement_ages[sim] = retirement_age
+            if not np.isnan(retirement_age):
+                ever_retired[sim] = True
+            if current_sim_record:
+                final_bequest_nominal = current_sim_record[-1]['PORTFOLIO_VALUE']
+                final_bequest_real = final_bequest_nominal / current_sim_record[-1]['CUMULATIVE_INFLATION']
+                final_spending_nominal = current_sim_record[-1]['NOMINAL_DESIRED_CONSUMPTION']
+                final_spending_real = current_sim_record[-1]['REAL_DESIRED_CONSUMPTION']
+                final_bequest_nominal_data.append(final_bequest_nominal)
+                final_bequest_real_data.append(final_bequest_real)
+                final_spending_nominal_data.append(final_spending_nominal)
+                final_spending_real_data.append(final_spending_real)
+            else:
+                final_bequest_nominal_data.append(0)
+                final_bequest_real_data.append(0)
+                final_spending_nominal_data.append(0)
+                final_spending_real_data.append(0)
+# -----------------------------------------------------------------------------
+# Summary
+# -----------------------------------------------------------------------------
+        print("\n--- Final Results ---")
+        valid_ages = retirement_ages[~np.isnan(retirement_ages)]
+        num_retired = len(valid_ages)
+        pct_ever_retired = 100 * num_retired / num_outer
+        median_age = np.nanpercentile(retirement_ages, 50)
+        p10 = np.nanpercentile(retirement_ages, 10)
+        p25 = np.nanpercentile(retirement_ages, 25)
+        p75 = np.nanpercentile(retirement_ages, 75)
+        p90 = np.nanpercentile(retirement_ages, 90)
+
+        def prob_retire_before(age_limit):
+            return 100 * np.sum((~np.isnan(retirement_ages)) & (retirement_ages <= age_limit)) / num_outer
+        prob_before_50 = prob_retire_before(50)
+        prob_before_55 = prob_retire_before(55)
+        prob_before_60 = prob_retire_before(60)
+
+        print(f"\nSimulations run: {num_outer}")
+        print(f"Ever retire with ≥{success_target*100}% success: {pct_ever_retired:.2f}%")
+        print(f"Median retirement age: {median_age:.1f}")
+        print(f"10th percentile retirement age: {p10:.1f}")
+        print(f"25th percentile retirement age: {p25:.1f}%")
+        print(f"75th percentile retirement age: {p75:.1f}")
+        print(f"90th percentile retirement age: {p90:.1f}")
+        print(f"Probability retire before age 50: {prob_before_50:.2f}%")
+        print(f"Probability retire before age 55: {prob_before_55:.2f}%")
+        print(f"Probability retire before age 60: {prob_before_60:.2f}%")
+
+        export_detailed_simulations_to_csv(detailed_simulations_to_export, 'detailed_lifecycle_paths.csv')
+
+        if plt:
+            ages = list(required_principal_table.keys())
+            principals_nominal = [row['principal_nominal'] for row in required_principal_data]
+            principals_real = [row['principal_real'] for row in required_principal_data]
+            swr = [row['swr'] for row in required_principal_data]
+
+            fig, ax1 = plt.subplots(figsize=(10, 6))
+            ax1.set_xlabel('Retirement Age', color='white')
+            ax1.set_ylabel('Required Principal ($)', color='white')
+            ax1.plot(ages, principals_nominal, color='cyan', marker='o', label='Required Principal (Nominal $)')
+            ax1.tick_params(axis='y', labelcolor='white')
+            ax1.grid(True, linestyle='--', alpha=0.5)
+            ax1.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+            ax2 = ax1.twinx()
+            ax2.set_ylabel('Withdrawal Rate (%)', color='white')
+            ax2.plot(ages, np.array(swr), color='magenta', marker='x', linestyle='--', label='Withdrawal Rate')
+            ax2.tick_params(axis='y', labelcolor='white')
+            ax2.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.2f}%'))
+            if include_social_security:
+                ax1.axvline(x=social_security_start_age, color='lime', linestyle=':', label=f'Social Security (Age {social_security_start_age})')
+            ax1.axvline(x=median_age, color='yellow', linestyle='--', label=f'Median Retirement Age ({median_age:.1f})')
+            fig.suptitle("Required Principal & Withdrawal Rate for 95% Success", fontsize=14, color='white')
+            fig.tight_layout()
+            fig.legend(loc="upper right", bbox_to_anchor=(1,1), bbox_transform=ax1.transAxes)
+            fig.savefig('required_principal_and_swr.png')
+
+            fig, ax3 = plt.subplots(figsize=(10, 6))
+            ax3.set_xlabel('Retirement Age', color='white')
+            ax3.set_ylabel('Required Principal (Real $)', color='white')
+            ax3.plot(ages, principals_real, color='lime', marker='o', label='Required Principal (Real $)')
+            ax3.tick_params(axis='y', labelcolor='white')
+            ax3.grid(True, linestyle='--', alpha=0.5)
+            ax3.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+            ax4 = ax3.twinx()
+            ax4.set_ylabel('Withdrawal Rate (%)', color='white')
+            ax4.plot(ages, np.array(swr), color='magenta', marker='x', linestyle='--', label='Withdrawal Rate')
+            ax4.tick_params(axis='y', labelcolor='white')
+            ax4.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.2f}%'))
+            if include_social_security:
+                ax3.axvline(x=social_security_start_age, color='lime', linestyle=':', label=f'Social Security (Age {social_security_start_age})')
+            ax3.axvline(x=median_age, color='yellow', linestyle='--', label=f'Median Retirement Age ({median_age:.1f})')
+            fig.suptitle("Required Principal (Real $) and Withdrawal Rate for 95% Success", fontsize=14, color='white')
+            fig.tight_layout()
+            fig.legend(loc="upper right", bbox_to_anchor=(1,1), bbox_transform=ax3.transAxes)
+            fig.savefig('required_principal_real_and_swr.png')
+
+            def plot_histogram(data, title, xlabel, filename):
+                plt.figure(figsize=(10, 6))
+                data = [x for x in data if x > 0]
+                if not data:
+                    print(f"No non-zero data to plot for '{title}'.")
+                    plt.title(title, color='white'); plt.xlabel(xlabel, color='white'); plt.ylabel("Number of Simulations", color='white'); plt.grid(axis='y', linestyle='--', alpha=0.7); plt.tight_layout(); plt.savefig(filename); return
+                data_range = max(data) - min(data)
+                if data_range > 0:
+                    bin_width = data_range / 800
+                    power_of_ten = 10**np.floor(np.log10(bin_width))
+                    bins_approx = [1, 2, 5, 10]
+                    bin_width_nice = min([p * power_of_ten for p in bins_approx if p * power_of_ten >= bin_width], key=lambda x: abs(x - bin_width))
+                    bins = np.arange(min(data), max(data) + bin_width_nice, bin_width_nice)
+                else: bins = 10
+                plt.hist(data, bins=bins, color='cyan', edgecolor='black', alpha=0.7)
+                plt.title(title, color='white'); plt.xlabel(xlabel, color='white'); plt.ylabel("Number of Simulations", color='white')
+                plt.gca().get_xaxis().set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+                plt.grid(axis='y', linestyle='--', alpha=0.7); plt.tight_layout(); plt.savefig(filename)
+            plot_histogram(final_bequest_nominal_data, "Distribution of Final Nominal Bequests", "Final Bequest (Nominal $)", 'final_nominal_bequest.png')
+            plot_histogram(final_bequest_real_data, "Distribution of Final Real Bequests", "Final Bequest (Real $)", 'final_real_bequest.png')
+            plot_histogram(final_spending_nominal_data, "Distribution of Final Nominal Spending", "Final Spending (Nominal $)", 'final_nominal_spending.png')
+            plot_histogram(final_spending_real_data, "Distribution of Final Real Spending", "Final Spending (Real $)", 'final_real_spending.png')
+
+            print("\n--- Generating Cumulative Probability of Retiring by Age Plot ---")
+            valid_retirement_ages = retirement_ages[~np.isnan(retirement_ages)]
+            if valid_retirement_ages.size > 0:
+                sorted_ages = np.sort(valid_retirement_ages)
+                cumulative_prob = np.arange(1, len(sorted_ages) + 1) / num_outer * 100
+                plt.figure(figsize=(10, 6))
+                plt.plot(sorted_ages, cumulative_prob, color='lime', marker='o', linestyle='-', markersize=5, alpha=0.8)
+                if include_social_security:
+                    plt.axvline(x=social_security_start_age, color='white', linestyle=':', label=f'Social Security (Age {social_security_start_age})')
+                if not np.isnan(median_age):
+                    plt.axvline(x=median_age, color='white', linestyle='--', label=f'Median Retirement Age ({median_age:.1f})')
+                plt.title("Cumulative Probability of Retiring by Age (≥95% success threshold)", color='white')
+                plt.xlabel("Age", color='white')
+                plt.ylabel("Cumulative Probability (%)", color='white')
+                plt.ylim(0, 100); plt.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray')
+                plt.legend(facecolor='black', edgecolor='white', framealpha=0.6); plt.tight_layout(); plt.savefig('cumulative_prob_retiring_by_age.png')
+            else:
+                print("No successful retirement paths to plot. Try increasing num_outer or adjusting parameters.")
+            plt.show()
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
