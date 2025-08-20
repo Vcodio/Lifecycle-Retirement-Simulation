@@ -1,0 +1,242 @@
+import numpy as np
+import pandas as pd
+from scipy.optimize import minimize
+from scipy.stats import norm, poisson
+from rich.console import Console
+from rich.table import Table
+
+# Initialize rich console for pretty printing
+console = Console()
+
+# ----------------------
+# User inputs / parameters
+# ----------------------
+csv_filename = 'Monte Carlo Asset Analyzer.csv'  # Updated to your filename
+days_in_year = 252                    # Standard number of trading days
+NUM_OPTIMIZER_RESTARTS = 20           # Increased number of restarts for robustness
+
+# ----------------------
+# Portfolio Definitions
+# ----------------------
+# These should match the asset names and weights from your main simulation script
+ASSET_NAMES = ['VTISIM','SPYSIM?L=2','VXUSSIM','DFSVX','DISVX','ZROZSIM']
+
+# Accumulation Phase Portfolio
+ACCUMULATION_WEIGHTS = np.array([0.3, 0.2, 0.1, 0.15, 0.05, 0.2])
+
+# Withdrawal Phase Portfolio
+WITHDRAWAL_WEIGHTS = np.array([0.6, 0.0, 0.2, 0.0, 0.0, 0.2])
+
+# ----------------------
+# Merton Jump-Diffusion Log-Likelihood Function
+# ----------------------
+def log_likelihood(params, returns):
+    """
+    Calculates the log-likelihood for the Merton jump-diffusion model.
+    This function is what the optimizer will maximize.
+
+    The Merton model assumes log-returns follow:
+    d log(S) = (mu - lambda * mu_J) dt + sigma dW + dJ
+
+    This is the log-likelihood for a time series of returns where each return
+    is a mixture of a normal distribution (diffusion) and a jump component.
+
+    Parameters:
+    - params: A tuple of (mu, sigma, lambda, mu_J, sigma_J)
+    - returns: A numpy array of the historical log returns
+
+    Returns:
+    - The negative log-likelihood value. We minimize the negative, which is
+      equivalent to maximizing the positive log-likelihood.
+    """
+    mu_daily, sigma_daily, lambda_daily, mu_J, sigma_J = params
+
+    # Ensure sigma, lambda, and sigma_J are non-negative for a valid model
+    if sigma_daily <= 0 or lambda_daily < 0 or sigma_J < 0:
+        return np.inf
+
+    n = len(returns)
+    ll_sum = 0
+
+    # For each number of jumps k, we calculate the probability of that many
+    # jumps occurring (Poisson distribution) and the likelihood of the returns
+    # given k jumps (Normal distribution).
+    # We sum over a finite number of possible jumps (e.g., k=0 to 10)
+    for k in range(11):  # Summing over a reasonable number of jumps
+        # Jump probability from Poisson process
+        poisson_prob = poisson.pmf(k, lambda_daily)
+
+        # Mean and std dev of returns given k jumps
+        mean_k = mu_daily + k * mu_J
+        std_k = np.sqrt(sigma_daily**2 + k * sigma_J**2)
+
+        # Likelihood of returns given k jumps
+        if std_k > 0:
+            likelihood_k = norm.pdf(returns, loc=mean_k, scale=std_k)
+        else: # Handle case with zero volatility
+            likelihood_k = np.zeros_like(returns)
+            likelihood_k[np.abs(returns - mean_k) < 1e-9] = 1 # delta function
+
+        # Total likelihood is a weighted sum over all possible k
+        ll_sum += poisson_prob * likelihood_k
+
+    # Take the log of the total likelihood and sum it up
+    log_l = np.sum(np.log(ll_sum))
+
+    return -log_l
+
+# ----------------------
+# Main Analysis Function
+# ----------------------
+def analyze_portfolio_mle(asset_data, weights, portfolio_name):
+    """
+    Fits the Merton jump-diffusion model to portfolio returns using MLE.
+    This version uses a multi-start approach to improve robustness.
+    """
+    # 1. Calculate daily log returns
+    log_returns = np.log(asset_data / asset_data.shift(1)).dropna()
+
+    # 2. Calculate daily portfolio returns
+    portfolio_daily_returns = (log_returns @ weights)
+
+    # 3. Define bounds for the parameters
+    bounds = [
+        (None, None),  # mu_daily
+        (1e-6, None),  # sigma_daily must be positive
+        (0, None),     # lambda_daily must be non-negative
+        (None, None),  # mu_J
+        (0, None)      # sigma_J must be non-negative
+    ]
+
+    best_result = None
+    min_nll = np.inf
+
+    # Increase the number of restarts for better robustness
+    for i in range(NUM_OPTIMIZER_RESTARTS):
+        # Generate better-informed random initial guesses based on empirical moments
+        returns_mean_emp = portfolio_daily_returns.mean()
+        returns_std_emp = portfolio_daily_returns.std()
+
+        # We start with guesses closer to what we expect.
+        initial_params = [
+            returns_mean_emp,                                   # mu_daily (start with empirical mean)
+            np.random.uniform(returns_std_emp * 0.5, returns_std_emp), # sigma_daily (diffusion is part of total vol)
+            np.random.uniform(0.0001, 0.005),                          # lambda_daily (small jump intensity)
+            np.random.uniform(-0.02, 0.02),                            # mu_J (jump mean)
+            np.random.uniform(1e-6, 0.02)                              # sigma_J (jump vol)
+        ]
+
+        # Perform the optimization
+        result = minimize(
+            log_likelihood,
+            initial_params,
+            args=(portfolio_daily_returns,),
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'disp': False, 'ftol': 1e-9, 'maxiter': 5000}
+        )
+
+        if result.success and result.fun < min_nll:
+            min_nll = result.fun
+            best_result = result
+
+    if not best_result or not best_result.success:
+        console.print(f"[bold yellow]Warning:[/bold yellow] Optimization failed for {portfolio_name}.")
+        console.print(f"  Reason: {best_result.message if best_result else 'No successful run'}")
+        return None
+
+    # 6. Extract and annualize the optimized parameters
+    mu_daily_opt, sigma_daily_opt, lambda_daily_opt, mu_J_opt, sigma_J_opt = best_result.x
+
+    # Annualize the parameters
+    mu_annual = mu_daily_opt * days_in_year
+    sigma_annual = sigma_daily_opt * np.sqrt(days_in_year)
+    lambda_annual = lambda_daily_opt * days_in_year
+    mu_J_annual = mu_J_opt
+    sigma_J_annual = sigma_J_opt
+
+    # Calculate the Total Mean Return and Total Volatility from the model parameters
+    # Total Mean Return = diffusion drift + (jump intensity * jump mean)
+    total_mean_return = mu_annual + lambda_annual * mu_J_annual
+
+    # Total Volatility = sqrt(continuous variance + jump variance)
+    # Jump variance = jump intensity * (jump mean^2 + jump std dev^2)
+    total_volatility = np.sqrt(sigma_annual**2 + lambda_annual * (mu_J_annual**2 + sigma_J_annual**2))
+
+
+    return {
+        'portfolio_name': portfolio_name,
+        'total_mean_return': total_mean_return,
+        'total_volatility': total_volatility,
+        'jump_intensity_annual': lambda_annual,
+        'jump_mean': mu_J_annual,
+        'jump_std_dev': sigma_J_annual
+    }
+
+# ----------------------
+# Main function to run the analysis
+# ----------------------
+def main():
+    """Main function to run the analysis and print the results."""
+    try:
+        data = pd.read_csv(csv_filename, index_col=0, parse_dates=True)
+
+        # List to store results from all analyses
+        all_results = []
+
+        # Analyze the two defined portfolios
+        console.print(f"[bold green]Fitting Merton model for Accumulation portfolio...[/bold green]")
+        acc_metrics = analyze_portfolio_mle(data[ASSET_NAMES], ACCUMULATION_WEIGHTS, "Accumulation")
+        if acc_metrics:
+            all_results.append(acc_metrics)
+
+        console.print(f"[bold green]Fitting Merton model for Withdrawal portfolio...[/bold green]")
+        wd_metrics = analyze_portfolio_mle(data[ASSET_NAMES], WITHDRAWAL_WEIGHTS, "Withdrawal")
+        if wd_metrics:
+            all_results.append(wd_metrics)
+
+        # Analyze each constituent asset
+        for asset_name in ASSET_NAMES:
+            console.print(f"[bold green]Fitting Merton model for {asset_name}...[/bold green]")
+            # Create a 100% weight for the current asset
+            weights = np.zeros(len(ASSET_NAMES))
+            weights[ASSET_NAMES.index(asset_name)] = 1.0
+
+            asset_metrics = analyze_portfolio_mle(data[ASSET_NAMES], weights, asset_name)
+            if asset_metrics:
+                all_results.append(asset_metrics)
+
+        # Combine and format the results for a single table
+        results_df = pd.DataFrame(all_results).set_index('portfolio_name')
+
+        if results_df.empty:
+            console.print("[bold red]Analysis failed for all portfolios and assets. See warnings above.[/bold red]")
+            return
+
+        final_df = results_df.rename(columns={
+            'total_mean_return': 'Total Mean Return (Annual)',
+            'total_volatility': 'Total Volatility (Annual)',
+            'jump_intensity_annual': 'Jump Intensity (Annual)',
+            'jump_mean': 'Jump Mean',
+            'jump_std_dev': 'Jump Std Dev'
+        })
+
+        print_rich_table(final_df, "Merton Jump-Diffusion Model Parameters")
+
+    except FileNotFoundError:
+        console.print(f"[bold red]Error:[/bold red] The file '{csv_filename}' was not found. Please ensure the CSV file is in the same directory and has the correct name.")
+    except Exception as e:
+        console.print(f"[bold red]An error occurred:[/bold red] {e}")
+
+def print_rich_table(df, title):
+    """Prints a pandas DataFrame using the rich library."""
+    table = Table(title=title, title_style="bold magenta", header_style="bold cyan")
+    table.add_column("Portfolio", justify="left")
+    for col in df.columns:
+        table.add_column(col, justify="right")
+    for index, row in df.iterrows():
+        table.add_row(index, *[f"{item:.4f}" if isinstance(item, (float, np.floating)) else str(item) for item in row])
+    console.print(table)
+
+if __name__ == "__main__":
+    main()
