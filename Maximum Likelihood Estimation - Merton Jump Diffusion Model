@@ -1,9 +1,14 @@
 # ============================================================
 # Version 2.0: Maximum Likelihood Estimation - Jump Diffusion
 #
+# This script uses maximum likelihood estimation to fit the 
+# Merton jump-diffusion model to financial data from a CSV file, 
+# analyzing both predefined portfolios and individual assets.
+#
 # Changes from Version 1.0:
 # - Optional Constraints to avoid model picking up noise
 # - Added Rich Table for Better viewing
+# - Option to forgo constituient asset analysis
 # - Several bug improvements and performance upgrades
 #
 #
