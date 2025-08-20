@@ -6,17 +6,20 @@ The simulation is based on a Fixed Spending Rule, where a constant, inflation ad
 How it Works
 
 Stage 1: The Destination
+
 The script first calculates the portfolio size you need to achieve your desired spending goal at various retirement ages. It determines this by running many "nested" simulations to find the principal required for a specified success rate.
 
 Stage 2: The Journey
+
 Next, the script runs thousands of "outer" simulations. In each one, it simulates your working life, including saving, market returns, and potential unemployment. It tracks your portfolio's growth until it reaches the principal goal, providing a distribution of possible retirement ages.
 
-Key Features
-Stochastic Modeling: Uses a Merton Jump Diffusion model for market returns and normal distributions for inflation and salary growth.
+Key Features:
+
+Stochastic Modeling: Uses a Merton Jump Diffusion model for market returns and normal distributions for inflation, salary growth and more.
 
 Detailed Outputs: Generates summary tables and a series of plots that visualize your results.
 
-Data Export: Exports detailed simulation data to CSV files for deeper analysis.
+Data Export: Exports detailed simulation data to CSV files for analysis and debugging.
 
 Setup
 Install the required libraries:
