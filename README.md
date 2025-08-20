@@ -4,6 +4,7 @@ This script is designed to simulate possibility of outcomes to not only simulate
 The simulation is based on a Fixed Spending Rule, where a constant, inflation adjusted amount is withdrawn from the portfolio each year in retirement. Over time I plan on upgrading this to use an Amortization based withdrawal strategy that will 
 
 How it Works
+
 Stage 1: The Destination
 The script first calculates the portfolio size you need to achieve your desired spending goal at various retirement ages. It determines this by running many "nested" simulations to find the principal required for a specified success rate.
 
