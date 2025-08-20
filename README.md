@@ -62,7 +62,7 @@ This change will require major overhauls on how we measure "succsss", and how we
 4. Simulate Mortality of a heterosexual couple so we properly account for longevity risk
 5. Rather than savings rate, have an "expenses rate" where those expenses are financed first, and savings are what is left over.
 6. Incorporate Taxes and Fees (Testfol.io likely already incorporates fees, if you are sourcing from them)
-7. Add forecast error on expected return assumptions rather than assuming perfect hindsight. Perhaps by making return assumptions at time t partially (but imperfectly) correlated with realized return at t-1.
+7. Add forecast error on expected return assumptions rather than assuming perfect hindsight. Perhaps by making return assumptions at time t positively but imperfectly correlated with realized return at t+1.
 8. Upgrade to GARCH Model
 9. Option to purchase an inflation indexed annuity at retirement
 10. Adding the ability to buy and hold bonds to maturity rather than relying on ETF's so we can see how duration matching impacts utility of consumption and bequest
