@@ -54,13 +54,18 @@ The simulation is currently using a Fixed Spending Rule, where a constant, infla
 
 Over time I plan on upgrading this to use an Amortization based withdrawal strategy that will allow some variability in spending. 
 
-This change will require major overhauls on how we measure "succsss". 
-1. Utility of consumption and bequest during withdrawal period.
-2. Percentage of times the portfolio was able to sustain above $X real during the withdrawal period.
+This change will require major overhauls on how we measure "succsss", and how we are running the simulation. Below are some of the improvements I plan on making to the script.
 
-I also would like to include several other things.
-1. Simulate Heterosexual couple mortality
-2. Rather than savings rate, have an "expenses rate" where those expenses are financed first, and savings are what is left over.
-3. Incorporate Taxes and Fees
-4. Add time varying risk premiums. Perhaps simulate cash flow and discount rate seperately, since amortization based withdrawals rely on expected return assumptions which are time varying.
-5. Upgrade to GARCH Model 
+1. Calculating Utility of consumption and bequest during withdrawal period.
+2. Proper estimation on CRRA, strength of bequest motive, and bequest curvature parameter.
+3. Percentage of times the portfolio was able to sustain above $X real during the withdrawal period.
+4. Simulate Mortality of a heterosexual couple so we properly account for longevity risk
+5. Rather than savings rate, have an "expenses rate" where those expenses are financed first, and savings are what is left over.
+6. Incorporate Taxes and Fees (Testfol.io likely already incorporates fees, if you are sourcing from them)
+7. Add forecast error on expected return assumptions rather than assuming perfect hindsight. Perhaps by making return assumptions at time t partially (but imperfectly) correlated with realized return at t-1.
+8. Upgrade to GARCH Model
+9. Option to purchase an inflation indexed annuity at retirement
+10. Adding the ability to buy and hold bonds to maturity rather than relying on ETF's so we can see how duration matching impacts utility of consumption and bequest
+11. Adding inflation indexed bonds
+12. Adding Glide path. Perhaps contingent on how far investor is from our estimated "FI/RE" number.
+13. Upgrade to simulate constiuent assets individually, rather than simulating the entire portfolio.
