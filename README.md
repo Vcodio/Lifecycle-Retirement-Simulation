@@ -54,18 +54,20 @@ The simulation is currently using a Fixed Spending Rule, where a constant, infla
 
 Over time I plan on upgrading this to use an Amortization based withdrawal strategy that will allow some variability in spending. 
 
-This change will require major overhauls on how we measure "succsss", and how we are running the simulation. Below are some of the improvements I plan on making to the script.
+This change will require major overhauls on how we measure "succsss", and how we are running the simulation. Below are some of the improvements I plan on making to the script. No particular order.
 
-1. Calculating Utility of consumption and bequest during withdrawal period.
-2. Proper estimation on CRRA, strength of bequest motive, and bequest curvature parameter.
-3. Percentage of times the portfolio was able to sustain above $X real during the withdrawal period.
-4. Simulate Mortality of a heterosexual couple so we properly account for longevity risk
-5. Rather than savings rate, have an "expenses rate" where those expenses are financed first, and savings are what is left over.
-6. Incorporate Taxes and Fees (Testfol.io likely already incorporates fees, if you are sourcing from them)
-7. Add forecast error on expected return assumptions rather than assuming perfect hindsight. Perhaps by making return assumptions at time t positively but imperfectly correlated with realized return at t+1.
-8. Upgrade to GARCH Model
-9. Option to purchase an inflation indexed annuity at retirement
-10. Adding the ability to buy and hold bonds to maturity rather than relying on ETF's so we can see how duration matching impacts utility of consumption and bequest
-11. Adding inflation indexed bonds
-12. Adding Glide path. Perhaps contingent on how far investor is from our estimated "FI/RE" number.
-13. Upgrade to simulate constiuent assets individually, rather than simulating the entire portfolio.
+1. Upgrade from Fixed Withdrawal strategy to an Amortization Based Withdrawal (ABW) strategy recalculated annually (each step). Perhaps use binary search to estimate what principal is needed to sustain an average real spending around $X, at Y age with Z% success rate.
+2.  Add forecast error on expected return assumptions for ABW rather than assuming perfect hindsight, or assuming static mean specified in beginning. Perhaps by making return assumptions at time t positively but imperfectly correlated with realized return at t+1. Thinking 0.4 by default.
+3.  Similar to the above, leverage Cholesky decompositon to make unemployment probability at time t inversly but imperfectly correlated with realized return at t+1. Lets do -0.25.
+4. Calculating Utility of consumption and bequest during withdrawal period. Adding real bequest to ABW strategy.
+5. Proper estimation on CRRA, strength of bequest motive, and bequest curvature parameter.
+6. Percentage of times the portfolio was able to sustain above $X real during the withdrawal period.
+7. Simulate Mortality of a heterosexual couple so we properly account for longevity risk
+8. Rather than savings rate, have an "expenses level" where those expenses are financed first, and savings are what is left over.
+9. Incorporate Taxes and Fees (Testfol.io likely already incorporates fees, if you are sourcing from them)
+10. Upgrade to GARCH Model
+11. Option to purchase an inflation indexed annuity at retirement
+12. Adding the ability to buy and hold bonds to maturity rather than relying on ETF's so we can see how duration matching impacts utility of consumption and bequest
+13. Adding inflation indexed bonds
+14. Adding Glide path. Perhaps contingent on how far investor is from our estimated "FI/RE" number.
+15. Upgrade to simulate constiuent assets individually, rather than simulating the entire portfolio.
