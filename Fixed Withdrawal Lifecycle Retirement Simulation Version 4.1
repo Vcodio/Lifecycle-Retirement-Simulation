@@ -132,12 +132,12 @@ wd_mean_return = np.dot(WITHDRAWAL_WEIGHTS, expected_returns_arithmetic)
 wd_std_return = np.sqrt(np.dot(WITHDRAWAL_WEIGHTS.T, np.dot(cov_matrix, WITHDRAWAL_WEIGHTS)))
 
 # Merton Jump Diffusion Parameters (Fit Historical data to Merton Jump Diffusion model. This is where the values are coming from)
-acc_jump_intensity = 74.6316
-acc_jump_mean = -0.0024
-acc_jump_std_dev = 0.0154
-wd_jump_intensity = 57.6199
-wd_jump_mean = -0.0018
-wd_jump_std_dev = 0.0135
+acc_jump_intensity = 0.25
+acc_jump_mean = -0.0137
+acc_jump_std_dev = 0.0558
+wd_jump_intensity =0.25
+wd_jump_mean = -0.00938
+wd_jump_std_dev = 0.0439
 
 rng = np.random.default_rng(seed=2025)
 # -----------------------------------------------------------------------------
