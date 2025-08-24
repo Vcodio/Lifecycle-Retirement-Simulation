@@ -58,7 +58,7 @@ This change will require major overhauls on how we measure "succsss", and how we
 
 1. Upgrade from Fixed Withdrawal strategy to an Amortization Based Withdrawal (ABW) strategy recalculated annually (each step). Perhaps use binary search to estimate what principal is needed to sustain an average real spending around $X, at Y age with Z% success rate.
 2.  Add forecast error on expected return assumptions for ABW rather than assuming perfect hindsight, or assuming static mean specified in beginning. Perhaps by making return assumptions at time t positively but imperfectly correlated with realized return at t+1. Thinking 0.4 by default.
-3.  Similar to the above, leverage Cholesky decompositon to make unemployment probability at time t inversly but imperfectly correlated with realized return at t+1. Lets do -0.25.
+3.  Similar to the above, leverage Cholesky decompositon to make unemployment probability at time t inversly but imperfectly correlated with realized return at t-1. Lets do -0.25.
 4. Calculating Utility of consumption and bequest during withdrawal period. Adding real bequest to ABW strategy.
 5. Proper estimation on CRRA, strength of bequest motive, and bequest curvature parameter.
 6. Percentage of times the portfolio was able to sustain above $X real during the withdrawal period.
