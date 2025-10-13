@@ -15,7 +15,7 @@ Next, the script runs thousands of "outer" simulations. In each one, it simulate
 
 Key Features:
 
-Stochastic Modeling: Uses a Merton Jump Diffusion model for market returns and normal distributions for inflation, salary growth and more.
+Stochastic Modeling: Uses a Bates model for market returns and normal distributions for inflation, salary growth and more.
 
 Detailed Outputs: Generates summary tables and a series of plots that visualize your results.
 
