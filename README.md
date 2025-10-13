@@ -48,7 +48,7 @@ include_social_security: A toggle to include Social Security benefits in the cal
 
 You can also adjust the asset assumptions and portfolio weights to match your personal investment strategy. In this example, the mean returns are forecasted, but the variances and covarainces are sourced from Testfol.io. Testfol.io is a good source.
 
-Jump Intensity, Jump Mean, Jump Std Dev are derrived from historical data. Here I fit the historical data to a Merton Jump Diffusion model. This script will also be provided in this Repo, and again I source a backtest of the portfolio from Testfol.io. If you want, you can alter these parameters to be whatever you would like. Here we have a large jump intensity with a low jump mean, but a low jump intensity and high jump mean might be better suited for you. 
+Jump Intensity, Jump Mean, Jump Std Dev are derrived from historical data. Here I fit the historical data to a Bates model. This script will also be provided in this Repo, and again I source a backtest of the portfolio from Testfol.io. If you want, you can alter these parameters to be whatever you would like. 
 
 The simulation is currently using a Fixed Spending Rule, where a constant, inflation adjusted amount is withdrawn from the portfolio each year in retirement. 
 
@@ -56,17 +56,18 @@ Over time I plan on upgrading this to use an Amortization based withdrawal strat
 
 This change will require major overhauls on how we measure "succsss", and how we are running the simulation. Below are some of the improvements I plan on making to the script. No particular order.
 
-1. Upgrade from Fixed Withdrawal strategy to an Amortization Based Withdrawal (ABW) strategy recalculated annually (each step). Perhaps use binary search to estimate what principal is needed to sustain an average real spending around $X, at Y age with Z% success rate.
-2.  Add forecast error on expected return assumptions for ABW rather than assuming perfect hindsight, or assuming static mean specified in beginning. Perhaps by making return assumptions at time t positively but imperfectly correlated with realized return at t+1. Thinking 0.4 by default.
-3. Calculating Utility of consumption and bequest during withdrawal period. Adding real bequest to ABW strategy.
-4. Proper estimation on CRRA, strength of bequest motive, and bequest curvature parameter.
-5. Percentage of times the portfolio was able to sustain above $X real during the withdrawal period.
-6. Simulate Mortality of a heterosexual couple so we properly account for longevity risk
-7. Rather than savings rate, have an "expenses level" where those expenses are financed first, and savings are what is left over.
-8. Incorporate Taxes and Fees (Testfol.io likely already incorporates fees, if you are sourcing from them)
-9. Upgrade to GARCH Model for inflation. 
-10. Option to purchase an annuity at retirement
-11. Adding the ability to buy and hold bonds to maturity rather than relying on ETF's so we can see how duration matching impacts utility of consumption and bequest
-12. Adding inflation indexed bond
-13. Adding Glide path. Perhaps contingent on how far investor is from our estimated "FI/RE" number.
-14. Upgrade to simulate constiuent assets individually, rather than simulating the entire portfolio.
+1. Allow the Monte Carlo simulation to switch between regimes. Each regime will have different parameters.
+2. Upgrade from Fixed Withdrawal strategy to an Amortization Based Withdrawal (ABW) strategy recalculated annually (each step). Perhaps use binary search to estimate what principal is needed to sustain an average real spending around $X, at Y age with Z% success rate.
+3.  Add forecast error on expected return assumptions for ABW rather than assuming perfect hindsight, or assuming static mean specified in beginning. Perhaps by making return assumptions at time t positively but imperfectly correlated with realized return at t+1. Thinking 0.4 by default.
+4. Calculating Utility of consumption and bequest during withdrawal period. Adding real bequest to ABW strategy.
+5. Proper estimation on CRRA, strength of bequest motive, and bequest curvature parameter.
+6. Percentage of times the portfolio was able to sustain above $X real during the withdrawal period.
+7. Simulate Mortality of a heterosexual couple so we properly account for longevity risk
+8. Rather than savings rate, have an "expenses level" where those expenses are financed first, and savings are what is left over.
+9. Incorporate Taxes and Fees (Testfol.io likely already incorporates fees, if you are sourcing from them)
+10. Upgrade to GARCH Model for inflation. 
+11. Option to purchase an annuity at retirement
+12. Adding the ability to buy and hold bonds to maturity rather than relying on ETF's so we can see how duration matching impacts utility of consumption and bequest
+13. Adding inflation indexed bond
+14. Adding Glide path. Perhaps contingent on how far investor is from our estimated "FI/RE" number.
+15. Upgrade to simulate constiuent assets individually, rather than simulating the entire portfolio.
