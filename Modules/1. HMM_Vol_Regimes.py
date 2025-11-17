@@ -1,3 +1,47 @@
+# ==============================================================
+# VERSION 2.0 — Hidden Markov Model Regime Detection (Volatility)
+# ==============================================================
+# This script infers market regimes (low, medium, high volatility)
+# from historical asset prices using a Hidden Markov Model (HMM).
+# It handles data preprocessing, feature engineering, and visualization.
+#
+# Key Features:
+# - Stage 1: Cleans and prepares historical data, handling malformed
+#            files and missing values robustly.
+# - Stage 2: Generates volatility-based features for HMM input.
+# - Stage 3: Fits a Gaussian HMM to quarterly annualized volatility
+#            and infers latent market regimes.
+# - Stage 4: Dynamically maps HMM states to canonical volatility ranks
+#            (low, medium, high).
+# - Stage 5: Calculates regime metrics including transition matrices,
+#            mean durations, stationary probabilities, and risk statistics.
+# - Stage 6: Visualizes regimes and overlays daily real returns.
+# - Stage 7: Exports quarterly regime classification with nominal returns
+#            for further analysis.
+#
+# NEW FEATURES IN VERSION 2.0:
+# - Multi-regime HMM with dynamic volatility ranking.
+# - Forward-fill mapping of quarterly regimes to daily data for risk analysis.
+# - Robust file parsing for CSV or fixed-width data.
+# - Optional start-date filtering for analysis subset.
+# - Debug mode with enhanced console output using Rich.
+# - Derived metrics: annual real/nominal returns, max drawdown.
+# - Comprehensive visualization with regime shading.
+#
+# Dependencies:
+#   pip install numpy pandas hmmlearn matplotlib rich scipy
+#
+# Configuration Options:
+# - NUM_REGIMES: Number of HMM latent states (default: 3)
+# - LOOKBACK_PERIOD: Non-overlapping quarterly step (default: 21 trading days)
+# - RANDOM_SEED: Seed for reproducibility (default: 42)
+# - DEBUG_MODE: Enables detailed intermediate output
+# - START_DATE_ANALYSIS: Optional start date for filtering historical data
+# - ASSET_PRICE_COLUMN_NAME: Column name of asset prices in CSV
+# --------------------------------------------------------------------------
+# Author: VCODIO
+# --------------------------------------------------------------------------
+
 import numpy as np
 import pandas as pd
 from hmmlearn import hmm
