@@ -6,7 +6,7 @@
 # defined financial market regimes. This is preferable to QMLE as the 
 # parameter estimates will better fit the historical skew and kurtosis
 # of each regime, although it will be substantially more computationally
-# intense. Both QMLE and MLE parameter estimates are available.
+# intense. Both QMLE and MLE parameter estimators are available.
 #
 # Key Features:
 # - Regime-specific fitting of Bates (Heston + Poisson Jumps) model.
