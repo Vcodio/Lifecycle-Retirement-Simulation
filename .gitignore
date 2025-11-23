@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Data files (uncomment if you want to ignore data)
+# data/*.csv
+# data/*.xlsx
+
+# Output files (uncomment if you want to ignore outputs)
+# output/*.png
+# output/*.pdf
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cython
+*.c
+*.html
+
+# Backups
+backups/
+
+# Temporary files
+*.tmp
+*.log
+
