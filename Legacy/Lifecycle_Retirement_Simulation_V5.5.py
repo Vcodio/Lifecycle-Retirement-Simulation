@@ -1,0 +1,899 @@
+# =============================================================
+# VERSION 5.5 — Lifecycle Retirement Simulation - Fixed Withdrawal
+# ================================================================
+# This script simulates a complete financial lifecycle, from the
+# accumulation phase (working and saving) to the retirement phase
+# (withdrawing from the portfolio). It uses a stochastic model to
+# account for market returns, inflation, salary growth, and even
+# unemployment. This uses a Fixed Spending Rule, withdrawing
+# spending_real from the portfolio every year.
+#
+# Key Features:
+# - Stage 1: Calculates the required principal to retire at various ages
+#            within a specified success rate.
+# - Stage 2: Runs a large number of simulations to determine the
+#            distribution of possible retirement ages.
+# - Stochastic Modeling: Uses a jump diffusion model for market returns
+#            and normal distributions for inflation, salary, and savings.
+# - CSV Export: Exports summary tables and detailed simulation paths for
+#               analysis and debugging.
+#
+# Changes from version 4:
+# - Upgrated from Stochastic Jump diffusion model to a Bates Model
+# - Upgraded from Annual steps to monthly steps
+# - Unemployment probability now coupled with exit probability so unemployment
+#   doesn't just last one step  
+# - Several bug fixes and performance enhancements
+#
+# Dependencies:
+#   pip install numpy pandas tqdm rich matplotlib
+#
+# ------------------------------------------------
+# Author: VCODIO
+# ------------------------------------------------
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+from rich.console import Console
+from rich.table import Table
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
+import logging
+import warnings
+import os
+import traceback
+
+# Set up the logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Filtering the warnings
+warnings.filterwarnings('ignore')
+
+# Meant to be the setup for plotting and console output
+try:
+    import matplotlib.pyplot as plt
+    plt.style.use('dark_background')
+    HAS_MATPLOTLIB = True
+except ImportError:
+    print("Matplotlib not found. Visualization will be skipped.")
+    HAS_MATPLOTLIB = False
+except Exception:
+    print("An error occurred while setting up Matplotlib.")
+    HAS_MATPLOTLIB = False
+
+try:
+    console = Console()
+    HAS_RICH = True
+except ImportError:
+    print("Rich library not found. Using standard print for tables.")
+    HAS_RICH = False
+
+# ---------------
+# Config Class
+# ---------------
+class SimulationConfig:
+    def __init__(self):
+        # Basic parameters
+        self.initial_age = 20
+        self.death_age = 100
+        self.initial_portfolio = 100_000
+
+        # Labor income parameters
+        self.annual_income_real = 50_000.0
+        self.annual_salary_growth_rate = 0.02
+        self.salary_growth_rate_std_dev = 0.015
+        self.savings_rate = 0.15
+        self.savings_rate_std_dev = 0.05
+        # Old unemployment probability line - no longer used.
+        self.unemployment_prob = 0.08
+        self.unemployment_income_multiplier = 0.25
+        self.unemployment_savings_rate = -0.05
+
+        # Spending and inflation (annual units)
+        self.spending_real = 50_000.0
+        self.mean_inflation_geometric = 0.025  # annual geometric mean
+        self.std_inflation = 0.025  # annual sd
+
+        # Social Security
+        self.social_security_real = 25_000.0
+        self.social_security_start_age = 67
+        self.include_social_security = True
+
+        # Simulation settings
+        self.num_outer = 10000  
+        self.num_nested = 500
+        self.success_target = 0.99
+        self.generate_csv_summary = True
+        self.num_sims_to_export = 50
+        self.seed = None
+        self.num_workers = max(1, mp.cpu_count() - 1)  # Leave one core free
+
+        # Portfolio parameters (THIS IS IN ANNUAL UNITS)
+        # mu is annual expected return (arithmetic drift)
+        # theta, v0 are annual variance levels
+        # kappa is per year mean reversion speed
+        # nu is annual vol of vol
+        # used MLE to fit Bates Model to historical data
+        self.params = {
+            "mu": 0.0928,
+            "kappa": 1.189,
+            "theta": 0.0201,   # annual variance level
+            "nu": 0.0219,      # vol of vol (annual)
+            "rho": -0.714,
+            "v0": 0.0201,      # initial annual variance
+            "lam": 0.353,      # jumps per year (intensity)
+            "mu_J": -0.007,    # log-jump mean (in log-return space)
+            "sigma_J": 0.0328, # log-jump sd
+        }
+
+    def validate(self):
+        """Validate that all parameters are within reasonable bounds"""
+        errors = []
+
+        # Basic validations
+        if not (0 < self.initial_age < self.death_age):
+            errors.append("Initial age must be between 0 and death age")
+        if self.initial_portfolio <= 0:
+            errors.append("Initial portfolio must be positive")
+
+        # Income and savings validations
+        if self.annual_income_real <= 0:
+            errors.append("Annual income must be positive")
+        if not (0 <= self.savings_rate <= 1):
+            errors.append("Savings rate must be between 0 and 1")
+        if not (0 <= self.unemployment_prob <= 1):
+            errors.append("Unemployment probability must be between 0 and 1")
+
+        # Inflation validations
+        if self.mean_inflation_geometric < -0.99:
+            errors.append("Mean inflation cannot be extremely negative")
+        if self.std_inflation < 0:
+            errors.append("Inflation standard deviation must be non-negative")
+
+        # Simulation validations
+        if self.num_outer <= 0 or self.num_nested <= 0:
+            errors.append("Simulation counts must be positive")
+        if not (0 < self.success_target <= 1):
+            errors.append("Success target must be between 0 and 1")
+
+        # Portfolio parameter validations
+        if self.params["kappa"] <= 0:
+            errors.append("Kappa must be positive")
+        if self.params["theta"] <= 0:
+            errors.append("Theta must be positive")
+        if self.params["nu"] <= 0:
+            errors.append("Volatility of volatility must be positive")
+        if not (-1 <= self.params["rho"] <= 1):
+            errors.append("Correlation coefficient must be between -1 and 1")
+        if self.params["v0"] <= 0:
+            errors.append("Initial variance must be positive")
+        if self.params["lam"] < 0:
+            errors.append("Jump intensity cannot be negative")
+        if self.params["sigma_J"] <= 0:
+            errors.append("Jump standard deviation must be positive")
+
+        if errors:
+            raise ValueError("Parameter validation failed:\n" + "\n".join(errors))
+
+        logger.info("All parameters validated successfully")
+
+    def to_dict(self):
+        """Return configuration as dictionary"""
+        return {attr: getattr(self, attr) for attr in dir(self)
+                if not attr.startswith('_') and not callable(getattr(self, attr))}
+
+# ----------------------
+# Unemployment Parameters
+# ----------------------
+# A new, dedicated object to neatly organize all unemployment related
+# parameters allowing for easy modification in one place.
+class UnemploymentConfig:
+    def __init__(self, baseline_exit=0.25, entry_prob_annual=0.10, lag_months=12, rho=-0.25):
+        # The baseline probability of exiting unemployment each month.
+        self.baseline_exit = baseline_exit
+        # The annual probability of entering unemployment. This is divided by 12
+        # for a monthly probability in the simulation.
+        self.entry_prob_annual = entry_prob_annual
+        # The number of months to lag the market return for the calculation.
+        self.lag_months = lag_months
+        # The correlation coefficient between the lagged return and the exit probability.
+        # A negative rho means a bad market (negative return) increases the exit probability.
+        self.rho = rho
+
+# ----------------------
+# Unemployment process
+# ----------------------
+class Unemployment:
+    def __init__(self, config, rng_local):
+        """
+        Initializes the unemployment process with a dedicated configuration object.
+
+        Args:
+            config (UnemploymentConfig): An instance of the UnemploymentConfig class.
+            rng_local (np.random.Generator): A local random number generator.
+        """
+        self.config = config
+        self.rng_local = rng_local
+        # Buffer to store monthly returns for the lagged YOY calculation.
+        self.return_buffer = [0.0] * config.lag_months
+        # Initial unemployment status.
+        self.is_unemployed = False
+
+    def update(self, monthly_return):
+        """
+        Updates the unemployment status on a monthly basis.
+
+        Args:
+            monthly_return (float): The market return for the current month.
+
+        Returns:
+            bool: The updated unemployment status (True if unemployed, False if employed).
+        """
+        # Record the latest monthly return, maintaining a fixed-size buffer.
+        self.return_buffer.append(monthly_return)
+        if len(self.return_buffer) > self.config.lag_months:
+            self.return_buffer.pop(0)
+
+        # Calculate the lagged 12-month YOY return from the buffer.
+        # Note: This is a simplified YOY calculation. For a true YOY, you'd
+        # need to multiply the monthly returns or use a different approach.
+        lagged_return = np.sum(self.return_buffer)
+
+        # Adjust the exit probability based on the lagged return and correlation (rho).
+        exit_prob = self.config.baseline_exit * (1.0 - self.config.rho * lagged_return)
+        # Clip the probability to ensure it stays within a reasonable range.
+        exit_prob = np.clip(exit_prob, 0.01, 0.9)
+
+        # If currently employed, possibly enter unemployment.
+        if not self.is_unemployed:
+            # The entry probability is the annual rate divided by 12.
+            entry_prob = self.config.entry_prob_annual / 12.0
+            if self.rng_local.random() < entry_prob:
+                self.is_unemployed = True
+        else:
+            # If currently unemployed, possibly exit based on the adjusted probability.
+            if self.rng_local.random() < exit_prob:
+                self.is_unemployed = False
+
+        return self.is_unemployed
+
+
+# ----------------------
+# Initialize configuration
+# ----------------------
+config = SimulationConfig()
+
+# Global RNG (for non-parallel parts)
+if config.seed is not None:
+    rng = np.random.default_rng(seed=config.seed)
+else:
+    rng = np.random.default_rng()
+
+# ----------------------
+# Portfolio Setup / monthly conversion helpers
+# ----------------------
+params = config.params
+
+# We'll keep Heston params in ANNUAL units (kappa, theta, v0, nu)
+# dt (months in years)
+dt = 1.0 / 12.0
+
+# For convenience, create monthly-scaled drift and monthly jump intensity inside functions
+acc_monthly_params = params.copy()
+wd_monthly_params = params.copy()
+
+# ----------------------
+# Helper Functions
+# ----------------------
+def convert_geometric_to_arithmetic(mean_geometric, std_dev):
+    # approximate conversion for annual rates: arith ≈ geo + 0.5*var
+    return mean_geometric + 0.5 * (std_dev**2)
+
+def calculate_max_drawdown(series):
+    if len(series) == 0:
+        return 0.0
+    series = np.array(series)
+    peak_series = np.maximum.accumulate(series)
+    drawdowns = (series - peak_series) / peak_series
+    return np.min(drawdowns) if drawdowns.size > 0 else 0.0
+
+def calculate_nominal_value(real_value, current_age_in_years, target_age_in_years, mean_inflation):
+    years = target_age_in_years - current_age_in_years
+    return real_value * (1 + mean_inflation)**years
+
+def simulate_monthly_return_svj(rng_local, params_annual, current_variance):
+    """
+    Simulates a single month's return using an Euler step for Heston-like variance
+    and a Merton-style lognormal jump model. All params_annual are in annual units.
+    - current_variance: annual variance level (not volatility)
+    Returns: simple_return_for_month, new_variance (annual variance)
+    """
+    kappa = params_annual["kappa"]
+    theta = params_annual["theta"]
+    nu = params_annual["nu"]
+    rho = params_annual["rho"]
+    jump_intensity = params_annual["lam"]
+    jump_mean = params_annual["mu_J"]
+    jump_std_dev = params_annual["sigma_J"]
+    mu_annual = params_annual["mu"]
+
+    # Two independent standard normals
+    z1 = rng_local.normal(0.0, 1.0)
+    z2 = rng_local.normal(0.0, 1.0)
+    z_v = z1
+    z_s = rho * z1 + np.sqrt(max(0.0, 1.0 - rho**2)) * z2
+
+    # Variance Euler step (annual variance units)
+    v = current_variance
+    dv = kappa * (theta - v) * dt + nu * np.sqrt(max(v, 0.0)) * np.sqrt(dt) * z_v
+    v_new = v + dv
+    v_new = max(v_new, 1e-8)
+
+    # Jump component: number of jumps in this month
+    num_jumps = rng_local.poisson(jump_intensity * dt)
+    jump_component = 0.0
+    if num_jumps > 0:
+        jump_component = rng_local.normal(jump_mean, jump_std_dev, size=num_jumps).sum()
+
+    # Merton correction: for lognormal jumps the drift correction is lam*(exp(mu_J + 0.5*sigma_J^2)-1)
+    jump_drift_correction = jump_intensity * (np.exp(jump_mean + 0.5 * jump_std_dev**2) - 1.0)
+
+    # Drift for this month (dt fraction of annual)
+    drift_component = (mu_annual - jump_drift_correction - 0.5 * v) * dt
+    diffusion_component = np.sqrt(max(v, 0.0)) * np.sqrt(dt) * z_s
+    diffusion_log_return = drift_component + diffusion_component
+
+    # Total log-return for the month (include jumps)
+    total_log_return = diffusion_log_return + jump_component
+
+    simple_return = np.exp(total_log_return) - 1.0
+    return simple_return, v_new
+
+def simulate_withdrawals(start_portfolio, start_age, rng_local, params_annual, spending_annual_real, include_social_security, social_security_real, social_security_start_age):
+    """
+    Simulate retirement withdrawal phase.
+    - Spending and Social Security are fixed for 12 months and adjusted annually.
+    - Inflation is sampled once per year (annual inflation, multiplicative).
+    - Returns update monthly (simulate_monthly_return_svj).
+    This version returns:
+      (is_successful (bool), mean_monthly_growth, std_monthly_growth, max_drawdown, portfolio_history)
+    """
+    portfolio = float(start_portfolio)
+    age_in_months = int(start_age * 12)
+    portfolio_history = [portfolio]
+    current_variance = params_annual["v0"]  # annual variance units
+
+    current_annual_spending_nominal = spending_annual_real
+    current_monthly_spending_nominal = current_annual_spending_nominal / 12.0
+    current_social_security_nominal = social_security_real
+    current_monthly_social_security_nominal = current_social_security_nominal / 12.0
+
+    while (age_in_months / 12.0) < config.death_age:
+        # Check if it's the start of a new year to adjust for inflation
+        if (age_in_months % 12) == 0 and age_in_months > int(start_age * 12):
+            annual_inflation = rng_local.normal(config.mean_inflation_geometric, config.std_inflation)
+            annual_inflation = max(annual_inflation, -0.99) # prevent negative portfolio value
+
+            current_annual_spending_nominal *= (1.0 + annual_inflation)
+            current_monthly_spending_nominal = current_annual_spending_nominal / 12.0
+
+            current_social_security_nominal *= (1.0 + annual_inflation)
+            current_monthly_social_security_nominal = current_social_security_nominal / 12.0
+
+        net_withdrawal_nominal = current_monthly_spending_nominal
+        if include_social_security and (age_in_months / 12.0) >= social_security_start_age:
+            net_withdrawal_nominal = max(0.0, net_withdrawal_nominal - current_monthly_social_security_nominal)
+
+        # Withdraw fixed monthly nominal amount
+        portfolio -= net_withdrawal_nominal
+        if portfolio <= 0:
+            return False, 0.0, 0.0, 0.0, []
+
+        # Apply monthly market return
+        market_return, current_variance = simulate_monthly_return_svj(rng_local, params_annual, current_variance)
+        portfolio *= (1.0 + market_return)
+        portfolio_history.append(portfolio)
+
+        age_in_months += 1
+
+    growth_rates = [portfolio_history[i] / portfolio_history[i-1] - 1.0 for i in range(1, len(portfolio_history))]
+    mean_growth = np.mean(growth_rates) if growth_rates else 0.0
+    std_dev = np.std(growth_rates) if growth_rates else 0.0
+    max_drawdown = calculate_max_drawdown(np.array(portfolio_history))
+
+    return True, mean_growth, std_dev, max_drawdown, portfolio_history
+
+def check_success_rate_worker(principal, retirement_age, num_sims, seed_offset):
+    """Worker function for parallel processing (runs 'num_sims' withdrawal-phase sims)."""
+    if config.seed is None:
+        nested_rng = np.random.default_rng()
+    else:
+        nested_rng = np.random.default_rng(seed=(config.seed + seed_offset + 1))
+
+    successes = 0
+    metrics = {'mean_growth': [], 'std_dev': [], 'max_drawdown': []}
+
+    for _ in range(num_sims):
+        is_success, mg, sd, mdd, _ = simulate_withdrawals(
+            principal, retirement_age, nested_rng, params, config.spending_real, config.include_social_security,
+            config.social_security_real, config.social_security_start_age
+        )
+        if is_success:
+            successes += 1
+            metrics['mean_growth'].append(mg)
+            metrics['std_dev'].append(sd)
+            metrics['max_drawdown'].append(mdd)
+
+    return {'successes': successes, 'metrics': metrics}
+
+def check_success_rate(principal, retirement_age, num_nested_sims):
+    """Parallel implementation of success rate checking; returns (success_rate, combined_metrics)."""
+    if config.num_workers <= 1 or num_nested_sims < 100:
+        res = check_success_rate_worker(principal, retirement_age, num_nested_sims, 0)
+        success_rate = res['successes'] / max(1, num_nested_sims)
+        combined_metrics = {k: np.array(v) for k, v in res['metrics'].items()}
+        return success_rate, combined_metrics
+
+    sims_per_worker = num_nested_sims // config.num_workers
+    remaining = num_nested_sims % config.num_workers
+    futures = []
+
+    with ProcessPoolExecutor(max_workers=config.num_workers) as executor:
+        for i in range(config.num_workers):
+            sims_this_worker = sims_per_worker + (1 if i < remaining else 0)
+            if sims_this_worker > 0:
+                futures.append(executor.submit(check_success_rate_worker, principal, retirement_age, sims_this_worker, i))
+
+        results = [f.result() for f in tqdm(futures, desc="Nested Simulations")]
+
+    total_successes = sum(r['successes'] for r in results)
+    all_mg = [np.array(r['metrics']['mean_growth']) for r in results if r['metrics']['mean_growth']]
+    all_sd = [np.array(r['metrics']['std_dev']) for r in results if r['metrics']['std_dev']]
+    all_mdd = [np.array(r['metrics']['max_drawdown']) for r in results if r['metrics']['max_drawdown']]
+
+    combined_metrics = {
+        'mean_growth': np.concatenate(all_mg) if all_mg else np.array([]),
+        'std_dev': np.concatenate(all_sd) if all_sd else np.array([]),
+        'max_drawdown': np.concatenate(all_mdd) if all_mdd else np.array([]),
+    }
+
+    success_rate = total_successes / max(1, num_nested_sims)
+    return success_rate, combined_metrics
+
+def find_required_principal(target_age, success_target, num_nested_sims):
+    """
+    Bisection search for the principal that achieves 'success_target' success probability
+    for retiring immediately at target_age.
+    """
+    low_principal = 10_000.0
+    high_principal = 20_000_000.0
+    tolerance = 1000.0
+
+    principal_cache = {}
+
+    while high_principal - low_principal > tolerance:
+        mid_principal = (low_principal + high_principal) / 2.0
+        cache_key = round(mid_principal, 2)
+
+        if cache_key in principal_cache:
+            success_rate = principal_cache[cache_key]
+        else:
+            success_rate, _ = check_success_rate(mid_principal, target_age, num_nested_sims)
+            principal_cache[cache_key] = success_rate
+
+        if success_rate >= success_target:
+            high_principal = mid_principal
+        else:
+            low_principal = mid_principal
+
+    return high_principal
+
+def print_rich_table(df, title):
+    if HAS_RICH:
+        table = Table(title=title, title_style="bold magenta", header_style="bold cyan")
+        for col in df.columns:
+            table.add_column(str(col), justify="right")
+        for _, row in df.iterrows():
+            table.add_row(*[str(item) for item in row])
+        console.print(table)
+    else:
+        print(f"\n--- {title} ---")
+        print(df.to_string())
+
+def export_to_csv(data, filename):
+    try:
+        df = pd.DataFrame(data)
+        directory = os.path.dirname(filename)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        df.to_csv(filename, index=False)
+        logger.info(f"Data successfully exported to '{filename}'")
+    except Exception as e:
+        logger.error(f"Error exporting to CSV '{filename}': {e}")
+
+def export_detailed_simulations_to_csv(sim_data, filename):
+    if not sim_data:
+        logger.warning("No detailed simulation data to export.")
+        return
+
+    try:
+        flat_data = [entry for sim in sim_data for entry in sim]
+        df = pd.DataFrame(flat_data)
+
+        # Ensure all columns are present before writing to CSV
+        all_expected_cols = [
+            'SIM_ID', 'AGE', 'RETIRED?', 'PORTFOLIO_VALUE', 'VOLATILITY',
+            'REQUIRED_REAL_PRINCIPAL', 'WITHDRAWAL_RATE', 'REQUIRED_NOMINAL_PRINCIPAL',
+            'NOMINAL_DESIRED_CONSUMPTION', 'REAL_DESIRED_CONSUMPTION',
+            'ANNUAL_INFLATION', 'CUMULATIVE_INFLATION',
+            'REAL_SOCIAL_SECURITY_BENEFIT', 'NOMINAL_SOCIAL_SECURITY_BENEFIT',
+            'SAVINGS_RATE', 'SALARY_REAL', 'SALARY_NOMINAL', 'EMPLOYED?', 'DOLLARS_SAVED',
+            'REAL_SALARY_GROWTH_RATE', 'NOMINAL_SALARY_GROWTH_RATE',
+            'MONTHLY_PORTFOLIO_RETURN', 'CUMULATIVE_PORTFOLIO_RETURN'
+        ]
+
+        for col in all_expected_cols:
+            if col not in df.columns:
+                df[col] = None
+
+        directory = os.path.dirname(filename)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        df.to_csv(filename, index=False, columns=all_expected_cols)
+        logger.info(f"Detailed simulations exported to '{filename}'")
+    except Exception as e:
+        logger.error(f"Error exporting detailed simulations to '{filename}': {e}")
+        traceback.print_exc()
+
+# ----------------------
+# The Main Execution
+# ----------------------
+if __name__ == "__main__":
+    try:
+        config.validate()
+        success_pct_label = f"{int(config.success_target * 100)}%"
+        print(f"\n--- Stage 1: Building Required Principal Lookup Table ({success_pct_label} success) ---")
+        target_ages = np.arange(30, 71)
+        required_principal_table = {}
+        mean_inflation_arithmetic = convert_geometric_to_arithmetic(config.mean_inflation_geometric, config.std_inflation)
+
+        for age in tqdm(target_ages, desc="Calculating required principal per age"):
+            principal = find_required_principal(age, config.success_target, config.num_nested)
+            required_principal_table[int(age)] = principal
+
+        required_principal_data = []
+        for age, principal_real in required_principal_table.items():
+            principal_nominal = calculate_nominal_value(principal_real, config.initial_age, age, mean_inflation_arithmetic)
+            net_withdrawal_real = config.spending_real
+            if config.include_social_security and age >= config.social_security_start_age:
+                net_withdrawal_real = max(0.0, config.spending_real - config.social_security_real)
+            swr_val = (net_withdrawal_real / principal_real) * 100.0 if principal_real > 0 else np.nan
+            nominal_spending_at_retirement = calculate_nominal_value(config.spending_real, config.initial_age, age, mean_inflation_arithmetic)
+            nominal_ss_at_retirement = 0.0
+            if config.include_social_security:
+                nominal_ss_at_retirement = calculate_nominal_value(config.social_security_real, config.initial_age, age, mean_inflation_arithmetic)
+            net_withdrawal_nominal = nominal_spending_at_retirement
+            if config.include_social_security and age >= config.social_security_start_age:
+                net_withdrawal_nominal = max(0.0, nominal_spending_at_retirement - nominal_ss_at_retirement)
+            required_principal_data.append({
+                'age': age,
+                'principal_real': principal_real,
+                'principal_nominal': principal_nominal,
+                'spending_real': config.spending_real,
+                'spending_nominal': nominal_spending_at_retirement,
+                'net_withdrawal_real': net_withdrawal_real,
+                'net_withdrawal_nominal': net_withdrawal_nominal,
+                'swr': swr_val
+            })
+
+        if config.generate_csv_summary:
+            export_to_csv(required_principal_data, 'output/required_principal_table.csv')
+
+        df_table = pd.DataFrame(required_principal_data)
+        df_table_display = df_table.copy()
+        for col in ['principal_real', 'principal_nominal', 'spending_real', 'spending_nominal', 'net_withdrawal_real', 'net_withdrawal_nominal']:
+            df_table_display[col] = df_table_display[col].apply(lambda x: f"${x:,.2f}")
+        df_table_display['swr'] = df_table_display['swr'].apply(lambda x: f"{x:.2f}%" if not np.isnan(x) else "NaN")
+        df_table_display.rename(columns={
+            'age': 'Retirement Age', 'principal_real': 'Principal (Real $)', 'principal_nominal': 'Principal (Nominal $)',
+            'spending_real': 'Spending (Real $)', 'spending_nominal': 'Spending (Nominal $)',
+            'net_withdrawal_real': 'Net Withdrawal (Real $)', 'net_withdrawal_nominal': 'Net Withdrawal (Nominal $)',
+            'swr': 'Withdrawal Rate'
+        }, inplace=True)
+        print_rich_table(df_table_display, f"Required Principal & Withdrawal Rate for {success_pct_label} Success (Real principals)")
+
+        principal_lookup = {int(row['age']): {'principal_real': row['principal_real'], 'principal_nominal': row['principal_nominal'], 'swr': row['swr']} for row in required_principal_data}
+
+        print("\n--- Stage 2: Running Accumulation Simulations (monthly returns, annual inflation adjustments) ---")
+        retirement_ages = np.full(config.num_outer, np.nan)
+        ever_retired = np.zeros(config.num_outer, dtype=bool)
+        detailed_simulations_to_export = []
+
+        # Initialize the unemployment configuration and process object
+        # This centralizes all unemployment related parameters for easy access.
+        unemp_config = UnemploymentConfig(
+            baseline_exit=0.25,
+            entry_prob_annual=config.unemployment_prob,
+            lag_months=12,
+            rho=-0.25
+        )
+        # Initialize the new unemployment process once before the loop.
+        unemployment = Unemployment(config=unemp_config, rng_local=rng)
+
+        monthly_income_real = config.annual_income_real / 12.0
+        monthly_social_security_real_unadjusted = config.social_security_real / 12.0
+        monthly_salary_growth_rate = (1 + config.annual_salary_growth_rate)**(1/12.0) - 1.0
+        monthly_salary_growth_rate_std_dev = config.salary_growth_rate_std_dev / np.sqrt(12.0)
+
+        all_final_bequest_nominal = []
+        all_final_bequest_real = []
+
+        for sim in tqdm(range(config.num_outer), desc="Running Simulations"):
+            portfolio = float(config.initial_portfolio)
+            age_in_months = int(config.initial_age * 12)
+            retirement_age = np.nan
+            is_retired = False
+            portfolio_growth_factor = 1.0
+            current_sim_record = []
+            current_variance = params["v0"]
+            cumulative_inflation_since_start = 1.0
+            annual_inflation_draw = 0.0
+            current_monthly_income_real = monthly_income_real
+            # We must reset the unemployment status for each simulation run
+            unemployment.is_unemployed = False
+            unemployment.return_buffer = [0.0] * unemp_config.lag_months
+
+            # Annual nominal spending for this simulation path
+            current_annual_spending_nominal = config.spending_real
+            current_monthly_spending_nominal = current_annual_spending_nominal / 12.0
+
+            # Annual nominal Social Security benefit for this simulation path
+            current_annual_ss_nominal = config.social_security_real
+            current_monthly_ss_nominal = current_annual_ss_nominal / 12.0
+
+            monthly_portfolio_returns = []
+
+            while (age_in_months / 12.0) <= config.death_age:
+                current_age_years = int(age_in_months // 12)
+
+                # Check for retirement on birthday
+                if (age_in_months % 12) == 0:
+                    if (not is_retired) and (current_age_years in principal_lookup):
+                        req = principal_lookup[current_age_years]
+                        required_principal_real = req.get('principal_real', np.nan)
+                        if not np.isnan(required_principal_real):
+                            required_principal_nominal = required_principal_real * cumulative_inflation_since_start
+                            if portfolio >= required_principal_nominal:
+                                retirement_age = current_age_years
+                                is_retired = True
+
+                # At the end of each year, update inflation and nominal values for the next year
+                if (age_in_months > int(config.initial_age * 12)) and ((age_in_months % 12) == 0):
+                    annual_inflation_draw = rng.normal(config.mean_inflation_geometric, config.std_inflation)
+                    annual_inflation_draw = max(annual_inflation_draw, -0.99)
+                    cumulative_inflation_since_start *= (1.0 + annual_inflation_draw)
+
+                    # Update next year's nominal spending
+                    current_annual_spending_nominal *= (1.0 + annual_inflation_draw)
+                    current_monthly_spending_nominal = current_annual_spending_nominal / 12.0
+
+                    # Update next year's nominal social security
+                    current_annual_ss_nominal *= (1.0 + annual_inflation_draw)
+                    current_monthly_ss_nominal = current_annual_ss_nominal / 12.0
+
+                # Simulate a monthly return
+                market_return, current_variance = simulate_monthly_return_svj(rng, params, current_variance)
+                monthly_portfolio_returns.append(market_return)
+                portfolio_growth_factor *= (1.0 + market_return)
+
+                # Labor income and savings if not retired
+                if not is_retired:
+                    # USE THE NEW UNEMPLOYMENT CLASS
+                    is_unemployed = unemployment.update(monthly_return=market_return)
+
+                    savings_rate_for_month = config.savings_rate if not is_unemployed else config.unemployment_savings_rate
+                    # Ensure positive savings rate
+                    savings_rate_for_month = max(0.0, savings_rate_for_month)
+
+                    income_for_month_real = current_monthly_income_real * (config.unemployment_income_multiplier if is_unemployed else 1.0)
+                    income_for_month_nominal = income_for_month_real * cumulative_inflation_since_start
+
+                    dollars_saved_nominal = income_for_month_nominal * savings_rate_for_month
+
+                    portfolio += dollars_saved_nominal
+
+                    # update salary monthly (real)
+                    salary_growth_rate_this_month_real = rng.normal(monthly_salary_growth_rate, monthly_salary_growth_rate_std_dev)
+                    current_monthly_income_real = max(0.0, current_monthly_income_real * (1.0 + salary_growth_rate_this_month_real))
+                else:
+                    # Withdraw fixed monthly amount (nominal)
+                    net_withdrawal = current_monthly_spending_nominal
+                    if config.include_social_security and current_age_years >= config.social_security_start_age:
+                        net_withdrawal = max(0.0, net_withdrawal - current_monthly_ss_nominal)
+
+                    portfolio -= net_withdrawal
+
+                # Apply monthly returns after savings/withdrawals
+                portfolio *= (1.0 + market_return)
+
+                # Floor negative portfolio to zero if retired and depleted
+                if is_retired and portfolio <= 0.0:
+                    portfolio = 0.0
+
+                # Stop if portfolio is depleted
+                if portfolio <= 0.0:
+                    break
+
+                # Store monthly records for export
+                if sim < config.num_sims_to_export:
+                    record_dict = {
+                        'SIM_ID': sim,
+                        'AGE': age_in_months / 12.0,
+                        'RETIRED?': is_retired,
+                        'PORTFOLIO_VALUE': portfolio,
+                        'VOLATILITY': current_variance,
+                        'REQUIRED_REAL_PRINCIPAL': principal_lookup.get(current_age_years, {}).get('principal_real', np.nan),
+                        'WITHDRAWAL_RATE': principal_lookup.get(current_age_years, {}).get('swr', np.nan),
+                        'REQUIRED_NOMINAL_PRINCIPAL': principal_lookup.get(current_age_years, {}).get('principal_nominal', np.nan),
+                        'NOMINAL_DESIRED_CONSUMPTION': current_monthly_spending_nominal * 12.0,
+                        'REAL_DESIRED_CONSUMPTION': config.spending_real,
+                        'ANNUAL_INFLATION': annual_inflation_draw if (age_in_months % 12) == 0 else np.nan,
+                        'CUMULATIVE_INFLATION': cumulative_inflation_since_start,
+                        'REAL_SOCIAL_SECURITY_BENEFIT': config.social_security_real if is_retired and current_age_years >= config.social_security_start_age else np.nan,
+                        'NOMINAL_SOCIAL_SECURITY_BENEFIT': current_annual_ss_nominal if is_retired and current_age_years >= config.social_security_start_age else np.nan,
+                        'SAVINGS_RATE': savings_rate_for_month * 12.0 if not is_retired else np.nan,
+                        'SALARY_REAL': current_monthly_income_real * 12.0 if not is_retired else np.nan,
+                        'SALARY_NOMINAL': (current_monthly_income_real * cumulative_inflation_since_start) * 12.0 if not is_retired else np.nan,
+                        'EMPLOYED?': (not is_unemployed) if not is_retired else False,
+                        'DOLLARS_SAVED': dollars_saved_nominal * 12.0 if not is_retired else np.nan,
+                        'REAL_SALARY_GROWTH_RATE': (monthly_salary_growth_rate * 12.0) if not is_retired else np.nan,
+                        'NOMINAL_SALARY_GROWTH_RATE': ((1 + monthly_salary_growth_rate) * (1 + annual_inflation_draw) - 1.0) * 12.0 if not is_retired else np.nan,
+                        'MONTHLY_PORTFOLIO_RETURN': market_return,
+                        'CUMULATIVE_PORTFOLIO_RETURN': portfolio_growth_factor - 1.0,
+                    }
+                    current_sim_record.append(record_dict)
+
+                # Advance month
+                age_in_months += 1
+
+            if sim < config.num_sims_to_export:
+                detailed_simulations_to_export.append(current_sim_record)
+
+            final_bequest_nominal = portfolio
+            final_bequest_real = final_bequest_nominal / cumulative_inflation_since_start
+            all_final_bequest_nominal.append(final_bequest_nominal)
+            all_final_bequest_real.append(final_bequest_real)
+
+            retirement_ages[sim] = retirement_age
+            if not np.isnan(retirement_age):
+                ever_retired[sim] = True
+
+        print("\n--- Final Results ---")
+        valid_ages = retirement_ages[~np.isnan(retirement_ages)]
+        num_retired = len(valid_ages)
+        pct_ever_retired = 100.0 * num_retired / max(1, config.num_outer)
+
+        # Check if valid_ages is empty to avoid errors
+        median_age = np.nan if valid_ages.size == 0 else np.median(valid_ages)
+        p10 = np.nan if valid_ages.size == 0 else np.percentile(valid_ages, 10)
+        p25 = np.nan if valid_ages.size == 0 else np.percentile(valid_ages, 25)
+        p75 = np.nan if valid_ages.size == 0 else np.percentile(valid_ages, 75)
+        p90 = np.nan if valid_ages.size == 0 else np.percentile(valid_ages, 90)
+
+        def prob_retire_before(age_limit):
+            if valid_ages.size == 0:
+                return 0.0
+            return 100.0 * np.sum(valid_ages <= age_limit) / config.num_outer
+
+        prob_before_50 = prob_retire_before(50)
+        prob_before_55 = prob_retire_before(55)
+        prob_before_60 = prob_retire_before(60)
+
+        print(f"\nSimulations run: {config.num_outer}")
+        print(f"Ever retire with >= {config.success_target*100:.0f}% success: {pct_ever_retired:.2f}%")
+        print(f"Median retirement age: {median_age:.1f}")
+        print(f"10th percentile retirement age: {p10:.1f}")
+        print(f"25th percentile retirement age: {p25:.1f}")
+        print(f"75th percentile retirement age: {p75:.1f}")
+        print(f"90th percentile retirement age: {p90:.1f}")
+        print(f"Probability retire before age 50: {prob_before_50:.2f}%")
+        print(f"Probability retire before age 55: {prob_before_55:.2f}%")
+        print(f"Probability retire before age 60: {prob_before_60:.2f}%")
+
+        if config.generate_csv_summary:
+            export_detailed_simulations_to_csv(detailed_simulations_to_export, 'output/detailed_lifecycle_paths.csv')
+
+        if HAS_MATPLOTLIB:
+            ages = list(required_principal_table.keys())
+            principals_nominal = [row['principal_nominal'] for row in required_principal_data]
+            principals_real = [row['principal_real'] for row in required_principal_data]
+            swr = [row['swr'] for row in required_principal_data]
+
+            fig, ax1 = plt.subplots(figsize=(12, 7))
+            ax1.set_xlabel('Retirement Age', color='white', fontsize=12)
+            ax1.set_ylabel('Required Principal ($)', color='white', fontsize=12)
+            ax1.plot(ages, principals_nominal, color='cyan', marker='o', label='Required Principal (Nominal $)', linewidth=2)
+            ax1.tick_params(axis='y', labelcolor='white')
+            ax1.grid(True, linestyle='--', alpha=0.5)
+            ax1.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+            ax2 = ax1.twinx()
+            ax2.set_ylabel('Withdrawal Rate (%)', color='white', fontsize=12)
+            ax2.plot(ages, np.array(swr), color='magenta', marker='x', linestyle='--', label='Withdrawal Rate', linewidth=2)
+            ax2.tick_params(axis='y', labelcolor='white')
+            ax2.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.2f}%'))
+            if config.include_social_security:
+                ax1.axvline(x=config.social_security_start_age, color='lime', linestyle=':', label=f'Social Security (Age {config.social_security_start_age})', linewidth=2)
+            if not np.isnan(median_age):
+                ax1.axvline(x=median_age, color='yellow', linestyle='--', label=f'Median Retirement Age ({median_age:.1f})', linewidth=2)
+            fig.suptitle(f"Required Principal & Withdrawal Rate for {success_pct_label} Success (Nominal)", fontsize=14, color='white')
+            fig.tight_layout()
+            fig.legend(loc="upper right", bbox_to_anchor=(1,1), bbox_transform=ax1.transAxes)
+            fig.savefig('output/required_principal_and_swr_nominal.png', dpi=300, bbox_inches='tight')
+
+            fig, ax1 = plt.subplots(figsize=(12, 7))
+            ax1.set_xlabel('Retirement Age', color='white', fontsize=12)
+            ax1.set_ylabel('Required Principal ($)', color='white', fontsize=12)
+            ax1.plot(ages, principals_real, color='orange', marker='o', label='Required Principal (Real $)', linewidth=2)
+            ax1.tick_params(axis='y', labelcolor='white')
+            ax1.grid(True, linestyle='--', alpha=0.5)
+            ax1.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+            ax2 = ax1.twinx()
+            ax2.set_ylabel('Withdrawal Rate (%)', color='white', fontsize=12)
+            ax2.plot(ages, np.array(swr), color='lime', marker='x', linestyle='--', label='Withdrawal Rate', linewidth=2)
+            ax2.tick_params(axis='y', labelcolor='white')
+            ax2.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.2f}%'))
+            if config.include_social_security:
+                ax1.axvline(x=config.social_security_start_age, color='cyan', linestyle=':', label=f'Social Security (Age {config.social_security_start_age})', linewidth=2)
+            if not np.isnan(median_age):
+                ax1.axvline(x=median_age, color='yellow', linestyle='--', label=f'Median Retirement Age ({median_age:.1f})', linewidth=2)
+            fig.suptitle(f"Required Principal & Withdrawal Rate for {success_pct_label} Success (Real)", fontsize=14, color='white')
+            fig.tight_layout()
+            fig.legend(loc="upper right", bbox_to_anchor=(1,1), bbox_transform=ax1.transAxes)
+            fig.savefig('output/required_principal_and_swr_real.png', dpi=300, bbox_inches='tight')
+
+            plt.figure(figsize=(12, 7))
+            if valid_ages.size > 0:
+                plt.hist(valid_ages, bins=20, color='cyan', edgecolor='black', alpha=0.7)
+                plt.axvline(median_age, color='red', linestyle='--', linewidth=2, label=f'Median: {median_age:.1f}')
+                plt.title('Distribution of Retirement Ages', fontsize=14, color='white')
+                plt.xlabel('Retirement Age', color='white', fontsize=12)
+                plt.ylabel('Frequency', color='white', fontsize=12)
+                plt.legend()
+                plt.grid(True, linestyle='--', alpha=0.5)
+                plt.savefig('output/retirement_age_distribution.png', dpi=300, bbox_inches='tight')
+
+            if detailed_simulations_to_export:
+                sample_sim = detailed_simulations_to_export[0]
+                ages = [entry['AGE'] for entry in sample_sim]
+                volatilities = [entry['VOLATILITY'] for entry in sample_sim]
+                plt.figure(figsize=(12, 7))
+                plt.plot(ages, volatilities, color='orange', linewidth=2)
+                plt.title('Sample Volatility Path', fontsize=14, color='white')
+                plt.xlabel('Age', color='white', fontsize=12)
+                plt.ylabel('Annual Volatility', color='white', fontsize=12)
+                plt.grid(True, linestyle='--', alpha=0.5)
+                plt.savefig('output/sample_volatility_path.png', dpi=300, bbox_inches='tight')
+
+            valid_retirement_ages = retirement_ages[~np.isnan(retirement_ages)]
+            if valid_retirement_ages.size > 0:
+                sorted_ages = np.sort(valid_retirement_ages)
+                cumulative_prob = np.arange(1, len(sorted_ages) + 1) / config.num_outer * 100
+                plt.figure(figsize=(12, 7))
+                plt.plot(sorted_ages, cumulative_prob, color='lime', marker='o', linestyle='-', markersize=4, alpha=0.8, linewidth=2)
+                if config.include_social_security:
+                    plt.axvline(x=config.social_security_start_age, color='white', linestyle=':', label=f'Social Security (Age {config.social_security_start_age})', linewidth=2)
+                if not np.isnan(median_age):
+                    plt.axvline(x=median_age, color='white', linestyle='--', label=f'Median Retirement Age ({median_age:.1f})', linewidth=2)
+                plt.title("Cumulative Probability of Retiring by Age", fontsize=14, color='white')
+                plt.xlabel("Age", color='white', fontsize=12)
+                plt.ylabel("Cumulative Probability (%)", color='white', fontsize=12)
+                plt.ylim(0, 100)
+                plt.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray')
+                plt.legend(facecolor='black', edgecolor='white', framealpha=0.6)
+                plt.tight_layout()
+                plt.savefig('output/cumulative_prob_retiring_by_age.png', dpi=300, bbox_inches='tight')
+
+    except Exception as e:
+        logger.error(f"An error occurred: {e}")
+        traceback.print_exc()
