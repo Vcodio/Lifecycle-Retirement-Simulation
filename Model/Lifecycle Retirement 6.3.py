@@ -1,14 +1,54 @@
 """
-CYTHONIZED VERSION - Google Colab Compatible
-VERSION 6.3 — Lifecycle Retirement Simulation - Fixed Withdrawal
-
-INSTALLATION INSTRUCTIONS FOR COLAB:
-1. Run this cell first to install Cython:
-   !pip install cython numpy pandas tqdm rich matplotlib
-
-2. Then run the cell with this code
-
-This version uses Cython for ~10-50x speedup on computational hotspots
+# =============================================================
+# VERSION 6.3 — Lifecycle Retirement Simulation - Fixed Withdrawal
+# ================================================================
+# This script simulates a complete financial lifecycle, from the
+# accumulation phase (working and saving) to the retirement phase
+# (withdrawing from the portfolio). It uses a stochastic model to
+# account for market returns, inflation, salary growth, and even
+# unemployment. This uses a Fixed Spending Rule, withdrawing
+# spending_real from the portfolio every year.
+#
+# Key Features:
+# - Stage 1: Calculates the required principal to retire at various ages
+#            within a specified success rate.
+# - Stage 2: Runs a large number of simulations to determine the
+#            distribution of possible retirement ages.
+# - Stochastic Modeling: Uses a Bates jump-diffusion model for market returns
+#            (parametric) or block bootstrap from historical data, with normal
+#            distributions for inflation, salary, and savings.
+# - Cython Acceleration: Uses compiled Cython extensions for 10-50x speedup
+#            on computational hotspots (automatic fallback to Python if unavailable).
+# - Block Bootstrap Option: Can use historical data blocks instead of parametric
+#            model to preserve historical correlations between returns and inflation.
+# - CSV Export: Exports summary tables and detailed simulation paths for
+#               analysis and debugging.
+#
+# Changes from version 5.5:
+# - Added Cython acceleration for ~10-50x performance improvement
+# - Added block bootstrap option to use historical data instead of parametric model
+# - Improved multiprocessing support for parallel simulations
+# - Enhanced inflation modeling with synchronized returns/inflation from bootstrap
+# - Better error handling and fallback mechanisms
+# - Google Colab compatible with inline Cython compilation
+#
+# Changes from version 4:
+# - Upgraded from Stochastic Jump Diffusion model to a Bates Model
+# - Upgraded from Annual steps to monthly steps
+# - Unemployment probability now coupled with exit probability so unemployment
+#   doesn't just last one step
+# - Several bug fixes and performance enhancements
+#
+# Dependencies:
+#   pip install numpy pandas tqdm rich matplotlib cython
+#
+# For Google Colab:
+#   1. Run: !pip install cython numpy pandas tqdm rich matplotlib
+#   2. Then run this script (Cython will compile inline)
+#
+# ------------------------------------------------
+# Author: VCODIO
+# ------------------------------------------------
 """
 
 # ============================================================================
