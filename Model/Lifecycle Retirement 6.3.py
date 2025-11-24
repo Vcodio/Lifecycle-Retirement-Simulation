@@ -261,8 +261,8 @@ class SimulationConfig:
         self.social_security_real = 25_000.0
         self.social_security_start_age = 67
         self.include_social_security = True
-        self.num_outer = 100
-        self.num_nested = 50
+        self.num_outer = 10000
+        self.num_nested = 5000
         self.success_target = 0.95
         self.generate_csv_summary = False
         self.num_sims_to_export = 50
@@ -274,8 +274,8 @@ class SimulationConfig:
         
         # Block bootstrap configuration
         self.use_block_bootstrap = True  # Toggle to use block bootstrap instead of parametric model
-        self.bootstrap_csv_path = 'data/TFP - Block Bootstrap.csv'  # Path to CSV file
-        self.portfolio_column_name = 'Three Fund Portfolio'  # Column name for portfolio returns (generalized)
+        self.bootstrap_csv_path = 'data/VCEA - Block Bootstrap.csv'  # Path to CSV file
+        self.portfolio_column_name = "Vcodio's Excellent Adventure"  # Column name for portfolio returns (generalized)
         self.inflation_column_name = 'Inflation'  # Column name for inflation data
         self.block_length_years = 10  # Block length in years (default 10 years = 120 months)
         self.block_overlapping = True  # Toggle for overlapping vs non-overlapping blocks
@@ -603,14 +603,16 @@ class BlockBootstrap:
         n_months = len(self.monthly_returns)
         
         if self.overlapping:
-            # Overlapping blocks: can start at any month
+            # Overlapping blocks: can start at any month (1-month step between block starts)
             # Last valid start index: n_months - block_length_months
             self.num_blocks = n_months - self.block_length_months + 1
-            self.block_starts = np.arange(self.num_blocks)
+            self.block_starts = np.arange(self.num_blocks)  # Blocks start at [0, 1, 2, 3, ..., num_blocks-1]
+            # This creates blocks with 1-month step size, maximizing the number of available blocks
         else:
             # Non-overlapping blocks: blocks don't overlap
             self.num_blocks = n_months // self.block_length_months
             self.block_starts = np.arange(self.num_blocks) * self.block_length_months
+            # This creates blocks with block_length_months step size (e.g., 120 months for 10-year blocks)
         
         if self.num_blocks == 0:
             raise ValueError(f"Not enough data for block length {self.block_length_months}. "
@@ -618,8 +620,10 @@ class BlockBootstrap:
         
         # Only log on first creation (when verbose=True)
         if verbose:
+            step_size = 1 if self.overlapping else self.block_length_months
             logger.info(f"Created {self.num_blocks} {'overlapping' if self.overlapping else 'non-overlapping'} "
-                       f"blocks of length {self.block_length_months} months")
+                       f"blocks of length {self.block_length_months} months "
+                       f"(step size: {step_size} month{'s' if step_size > 1 else ''} between block starts)")
     
     def sample_block(self):
         """
@@ -760,11 +764,14 @@ def create_block_bootstrap_sampler(config, rng, monthly_returns=None, monthly_in
             n_months = len(monthly_returns)
             if config.block_overlapping:
                 num_blocks = n_months - block_length_months + 1
+                step_size = 1  # Overlapping blocks have 1-month step between starts
             else:
                 num_blocks = n_months // block_length_months
+                step_size = block_length_months  # Non-overlapping blocks have block_length step
             logger.info(f"Block structure computed: {num_blocks} {'overlapping' if config.block_overlapping else 'non-overlapping'} "
-                       f"blocks of length {block_length_months} months available. "
-                       f"Each simulation will randomly sample different blocks from this pool.")
+                       f"blocks of length {block_length_months} months available "
+                       f"(step size: {step_size} month{'s' if step_size > 1 else ''} between block starts). "
+                       f"Each simulation will randomly sample different blocks from this pool of {num_blocks} blocks.")
             _block_structure_logged = True
         
         bootstrap_sampler = BlockBootstrap(

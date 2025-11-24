@@ -1,4 +1,7 @@
 # Lifecycle-Retirement-Simulation
+
+**Version 6.3** - Cythonized with Block Bootstrap Support
+
 This script is designed to simulate possibility of outcomes to not only simulate how robust your portfolio is at sustaining withdrawals in retirement, but at what age you will be able to retire given an uncertain labor income. 
 
 
@@ -15,15 +18,33 @@ Next, the script runs thousands of "outer" simulations. In each one, it simulate
 
 Key Features:
 
-Stochastic Modeling: Uses a Bates model for market returns and normal distributions for inflation, salary growth and more.
+**Stochastic Modeling**: Uses a Bates jump-diffusion model for market returns (parametric) or block bootstrap from historical data, with normal distributions for inflation, salary growth and more.
 
-Detailed Outputs: Generates summary tables and a series of plots that visualize your results.
+**Cython Acceleration**: Compiled Cython extensions provide 10-50x speedup on computational hotspots (automatic fallback to Python if unavailable).
 
-Data Export: Exports detailed simulation data to CSV files for analysis and debugging.
+**Block Bootstrap Option**: Can use historical data blocks instead of parametric model to preserve historical correlations between returns and inflation.
 
-Setup
+**Monthly Time Steps**: Simulates on a monthly basis for more granular and accurate modeling.
+
+**Unemployment Modeling**: Realistic unemployment dynamics with exit probability coupled to market returns.
+
+**Detailed Outputs**: Generates summary tables and a series of plots that visualize your results.
+
+**Data Export**: Exports detailed simulation data to CSV files for analysis and debugging.
+
+## Setup
+
+### Installation
 Install the required libraries:
-pip install numpy pandas tqdm rich matplotlib
+```bash
+pip install numpy pandas tqdm rich matplotlib cython
+```
+
+**Note**: Cython is optional but highly recommended for performance. The script will automatically fall back to pure Python if Cython modules are not available.
+
+### For Google Colab
+1. Run: `!pip install cython numpy pandas tqdm rich matplotlib`
+2. Then run the script (Cython will compile inline automatically)
 
 
 The script's behavior is controlled by the User inputs / parameters section near the top. You can customize the simulation by changing these values:
@@ -50,13 +71,21 @@ You can also adjust the asset assumptions and portfolio weights to match your pe
 
 Jump Intensity, Jump Mean, Jump Std Dev are derrived from historical data. Here I fit the historical data to a Bates model. This script will also be provided in this Repo, and again I source a backtest of the portfolio from Testfol.io. If you want, you can alter these parameters to be whatever you would like. 
 
-The simulation is currently using a Fixed Spending Rule, where a constant, inflation adjusted amount is withdrawn from the portfolio each year in retirement. 
+The simulation is currently using a **Fixed Spending Rule**, where a constant, inflation-adjusted amount is withdrawn from the portfolio each month in retirement.
+
+**Version 6.3 Improvements:**
+- Cython acceleration for 10-50x performance improvement
+- Block bootstrap option to use historical data instead of parametric model
+- Monthly time steps (upgraded from annual in version 4)
+- Enhanced unemployment modeling with market-return-coupled exit probabilities
+- Improved multiprocessing support for parallel simulations
+- Better error handling and fallback mechanisms 
 
 Over time I plan on upgrading this to use an Amortization based withdrawal strategy that will allow some variability in spending. 
 
-This change will require major overhauls on how we measure "succsss", and how we are running the simulation. Below are some of the improvements I plan on making to the script. No particular order.
+This change will require major overhauls on how we measure "success", and how we are running the simulation. Below are some of the improvements I plan on making to the script. No particular order.
 
-1. Allow the Monte Carlo simulation to switch between regimes. Each regime will have different parameters.
+1. ~~Allow the Monte Carlo simulation to switch between regimes. Each regime will have different parameters.~~ *(Partially implemented in parametric model modules - regime switching available but not yet integrated into main simulation)*
 2. Upgrade from Fixed Withdrawal strategy to an Amortization Based Withdrawal (ABW) strategy recalculated annually (each step). Perhaps use binary search to estimate what principal is needed to sustain an average real spending around $X, at Y age with Z% success rate.
 3.  Add forecast error on expected return assumptions for ABW rather than assuming perfect hindsight, or assuming static mean specified in beginning. Perhaps by making return assumptions at time t positively but imperfectly correlated with realized return at t+1. Thinking 0.4 by default.
 4. Calculating Utility of consumption and bequest during withdrawal period. Adding real bequest to ABW strategy.
@@ -70,4 +99,4 @@ This change will require major overhauls on how we measure "succsss", and how we
 12. Adding the ability to buy and hold bonds to maturity rather than relying on ETF's so we can see how duration matching impacts utility of consumption and bequest
 13. Adding inflation indexed bond
 14. Adding Glide path. Perhaps contingent on how far investor is from our estimated "FI/RE" number.
-15. Upgrade to simulate constiuent assets individually, rather than simulating the entire portfolio.
+15. Upgrade to simulate constituent assets individually, rather than simulating the entire portfolio.
