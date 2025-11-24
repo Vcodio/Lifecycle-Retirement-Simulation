@@ -10,7 +10,7 @@ How it Works
 
 Stage 1: The Destination
 
-The script first calculates the portfolio size you need to achieve your desired spending goal at various retirement ages. It determines this by running many "nested" simulations to find the principal required for a specified success rate.
+The script first calculates the portfolio size you need to achieve your desired spending goal at various retirement ages. It estimates this by running many "nested" simulations to find the principal required for a specified success rate.
 
 Stage 2: The Journey
 
