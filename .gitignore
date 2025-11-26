@@ -39,9 +39,17 @@ env/
 # data/*.csv
 # data/*.xlsx
 
-# Output files (uncomment if you want to ignore outputs)
-# output/*.png
-# output/*.pdf
+# Output files - these are generated and shouldn't be committed
+output/*.png
+output/*.pdf
+output/*.csv
+
+# Build artifacts (compiled Cython modules)
+build/**/*.pyd
+build/**/*.exp
+build/**/*.lib
+build/**/*.obj
+build/temp.*/
 
 # OS
 .DS_Store

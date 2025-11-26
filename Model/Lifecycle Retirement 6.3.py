@@ -59,17 +59,19 @@ import os
 
 # Add parent directories to path to find compiled Cython module
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-_parent_dir = os.path.dirname(_script_dir)
-_grandparent_dir = os.path.dirname(_parent_dir)
+_parent_dir = os.path.dirname(_script_dir)  # This is the project root directory
 if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
-if _grandparent_dir not in sys.path:
-    sys.path.insert(0, _grandparent_dir)
 
-# Add cython folder to path
-_cython_dir = os.path.join(_grandparent_dir, 'cython')
-if os.path.exists(_cython_dir) and _cython_dir not in sys.path:
-    sys.path.insert(0, _cython_dir)
+# Add build directory to path (where compiled Cython modules are located)
+_build_dir = os.path.join(_parent_dir, 'build')
+if os.path.exists(_build_dir) and _build_dir not in sys.path:
+    sys.path.insert(0, _build_dir)
+
+# Also check lib.win-amd64-cpython-XXX subdirectory (Windows build structure)
+_build_lib_dir = os.path.join(_build_dir, f'lib.win-amd64-cpython-{sys.version_info.major}{sys.version_info.minor}')
+if os.path.exists(_build_lib_dir) and _build_lib_dir not in sys.path:
+    sys.path.insert(0, _build_lib_dir)
 
 # Try to import the compiled Cython module (don't print here - printed in main() only)
 CYTHON_AVAILABLE = False
@@ -244,10 +246,10 @@ except ImportError:
 
 class SimulationConfig:
     def __init__(self):
-        self.initial_age = 25
+        self.initial_age = 40
         self.death_age = 100
-        self.initial_portfolio = 180_000
-        self.annual_income_real = 77_000.0
+        self.initial_portfolio = 295_000
+        self.annual_income_real = 95_000
         self.annual_salary_growth_rate = 0.07
         self.salary_growth_rate_std_dev = 0.03
         self.savings_rate = 0.25
@@ -261,9 +263,9 @@ class SimulationConfig:
         self.social_security_real = 25_000.0
         self.social_security_start_age = 67
         self.include_social_security = True
-        self.num_outer = 10000
-        self.num_nested = 5000
-        self.success_target = 0.95
+        self.num_outer = 100
+        self.num_nested = 50
+        self.success_target = 0.99
         self.generate_csv_summary = False
         self.num_sims_to_export = 50
         self.seed = None
@@ -274,8 +276,8 @@ class SimulationConfig:
         
         # Block bootstrap configuration
         self.use_block_bootstrap = True  # Toggle to use block bootstrap instead of parametric model
-        self.bootstrap_csv_path = 'data/VCEA - Block Bootstrap.csv'  # Path to CSV file
-        self.portfolio_column_name = "Vcodio's Excellent Adventure"  # Column name for portfolio returns (generalized)
+        self.bootstrap_csv_path = 'data/TFP - Block Bootstrap.csv'  # Path to CSV file
+        self.portfolio_column_name = "Three Fund Portfolio"  # Column name for portfolio returns (generalized)
         self.inflation_column_name = 'Inflation'  # Column name for inflation data
         self.block_length_years = 10  # Block length in years (default 10 years = 120 months)
         self.block_overlapping = True  # Toggle for overlapping vs non-overlapping blocks
@@ -550,12 +552,6 @@ def load_and_convert_to_monthly_returns(csv_path, portfolio_column_name, inflati
             raise ValueError(f"Alignment error: monthly_returns and monthly_inflation must have same length. "
                            f"Got {len(monthly_returns)} and {len(monthly_inflation)}")
         
-        logger.info(f"Loaded {len(monthly_returns)} monthly returns from CSV")
-        logger.info(f"Monthly returns range: {np.min(monthly_returns):.4f} to {np.max(monthly_returns):.4f}")
-        logger.info(f"Loaded {len(monthly_inflation)} monthly inflation values from CSV")
-        logger.info(f"Monthly inflation range: {np.min(monthly_inflation):.4f} to {np.max(monthly_inflation):.4f}")
-        logger.info(f"✓ Returns and inflation are aligned by date index - correlation preserved")
-        
         return monthly_returns, monthly_inflation, monthly_dates
         
     except Exception as e:
@@ -719,7 +715,6 @@ def load_bootstrap_data(config):
         )
         
         _bootstrap_data_cache = (monthly_returns, monthly_inflation)
-        logger.info(f"Bootstrap data loaded and cached: {len(monthly_returns)} monthly returns")
         
         return _bootstrap_data_cache
         
@@ -727,9 +722,6 @@ def load_bootstrap_data(config):
         logger.error(f"Failed to load bootstrap data: {e}")
         raise
 
-
-# Track if we've logged block structure info
-_block_structure_logged = False
 
 def create_block_bootstrap_sampler(config, rng, monthly_returns=None, monthly_inflation=None):
     """
@@ -744,8 +736,6 @@ def create_block_bootstrap_sampler(config, rng, monthly_returns=None, monthly_in
     Returns:
         BlockBootstrap instance or None if block bootstrap is disabled
     """
-    global _block_structure_logged
-    
     if not config.use_block_bootstrap:
         return None
     
@@ -759,20 +749,8 @@ def create_block_bootstrap_sampler(config, rng, monthly_returns=None, monthly_in
         
         block_length_months = int(config.block_length_years * 12)
         
-        # Log block structure info only once
-        if not _block_structure_logged:
-            n_months = len(monthly_returns)
-            if config.block_overlapping:
-                num_blocks = n_months - block_length_months + 1
-                step_size = 1  # Overlapping blocks have 1-month step between starts
-            else:
-                num_blocks = n_months // block_length_months
-                step_size = block_length_months  # Non-overlapping blocks have block_length step
-            logger.info(f"Block structure computed: {num_blocks} {'overlapping' if config.block_overlapping else 'non-overlapping'} "
-                       f"blocks of length {block_length_months} months available "
-                       f"(step size: {step_size} month{'s' if step_size > 1 else ''} between block starts). "
-                       f"Each simulation will randomly sample different blocks from this pool of {num_blocks} blocks.")
-            _block_structure_logged = True
+        # Note: Block structure logging is done in load_bootstrap_data() to ensure it only logs once
+        # even with multiprocessing (since data is cached globally)
         
         bootstrap_sampler = BlockBootstrap(
             monthly_returns,

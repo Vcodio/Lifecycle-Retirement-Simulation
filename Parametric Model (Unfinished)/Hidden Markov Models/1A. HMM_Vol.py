@@ -53,7 +53,7 @@ from rich.console import Console
 from rich.table import Table
 
 # --- 1. CONFIGURATION ---
-NUM_REGIMES = 1  # Three volatility regimes: Low, Medium, High Volatility
+NUM_REGIMES = 3  # Three volatility regimes: Low, Medium, High Volatility
 # The lookback period for non-overlapping steps (21 days is approx 1 trading month)
 LOOKBACK_PERIOD = 21
 RANDOM_SEED = 1
